@@ -59,6 +59,7 @@ input[type="file"] { display: none; }
 @keyframes scroll-progress { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }
 .progress-info { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 12px; color: #666; gap: 12px; }
 .progress-speed { color: #10b981; font-weight: 500; }
+.progress-eta { color: #10b981; font-weight: 500; }
 .progress-percent { font-weight: 600; color: #3b82f6; }
 .toast { position: fixed; top: 20px; right: 20px; padding: 10px 16px; border-radius: 6px; font-size: 13px; z-index: 1000; opacity: 0; transform: translateY(-10px); transition: all 0.3s; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
 .toast.show { opacity: 1; transform: translateY(0); }
@@ -99,7 +100,7 @@ input[type="file"] { display: none; }
         <div class="progress-info">
           <span id="progressSize">0 KB / 0 KB</span>
           <span id="progressSpeed"></span>
-          <span id="progressCount">0 / 0 文件</span>
+          <span class="progress-eta" id="progressEta"></span>
           <span class="progress-percent" id="progressPercent">0%</span>
         </div>
       </div>
@@ -134,7 +135,7 @@ const bar = document.getElementById('progressBar');
 const track = document.getElementById('progressTrack');
 const fill = document.getElementById('progressFill');
 const sizeEl = document.getElementById('progressSize');
-const countEl = document.getElementById('progressCount');
+const etaEl = document.getElementById('progressEta');
 const percentEl = document.getElementById('progressPercent');
 const speedEl = document.getElementById('progressSpeed');
 const currentPath = '{{current_path}}';
@@ -150,6 +151,18 @@ function formatSpeed(bytesPerSec) {
   if (bytesPerSec < 1024) return bytesPerSec.toFixed(0) + ' B/s';
   if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
   return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
+}
+
+function formatEta(seconds) {
+  if (seconds < 60) return '剩余 ' + Math.round(seconds) + 's';
+  if (seconds < 3600) {
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    return '剩余 ' + m + 'm ' + s + 's';
+  }
+  const h = Math.floor(seconds / 3600);
+  const m = Math.round((seconds % 3600) / 60);
+  return '剩余 ' + h + 'h ' + m + 'm';
 }
 
 function showToast(msg, type) {
@@ -183,20 +196,19 @@ function createFolder() {
 function uploadFiles(fileList) {
   if (fileList.length === 0) return;
 
-  const totalFiles = fileList.length;
-  let totalBytes = 0;
-  for (const f of fileList) totalBytes += f.size;
+  const files = Array.from(fileList);
+  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
 
   bar.style.display = 'block';
   fill.style.width = '0%';
   sizeEl.textContent = '0 / ' + formatBytes(totalBytes);
-  countEl.textContent = '0 / ' + totalFiles + ' 文件';
-  percentEl.textContent = '0%';
+  etaEl.textContent = '';
+  percentEl.textContent = '0.0%';
   speedEl.textContent = '';
   setScrolling(true);
 
   const fd = new FormData();
-  for (const f of fileList) {
+  for (const f of files) {
     let path;
     if (f._relativePath) {
       path = f._relativePath;
@@ -215,10 +227,12 @@ function uploadFiles(fileList) {
     if (e.lengthComputable) {
       const elapsed = (Date.now() - startTime) / 1000;
       const speed = elapsed > 0 ? e.loaded / elapsed : 0;
-      const percent = Math.round((e.loaded / e.total) * 100);
+      const percent = (e.loaded / e.total * 100).toFixed(1);
+      const remaining = e.total - e.loaded;
+      const eta = speed > 0 ? remaining / speed : 0;
       fill.style.width = percent + '%';
       sizeEl.textContent = formatBytes(e.loaded) + ' / ' + formatBytes(e.total);
-      countEl.textContent = totalFiles + ' / ' + totalFiles + ' 文件';
+      etaEl.textContent = elapsed > 1 ? formatEta(eta) : '';
       percentEl.textContent = percent + '%';
       speedEl.textContent = formatSpeed(speed);
     }
@@ -228,8 +242,8 @@ function uploadFiles(fileList) {
     setScrolling(false);
     fill.style.width = '100%';
     sizeEl.textContent = formatBytes(totalBytes) + ' / ' + formatBytes(totalBytes);
-    countEl.textContent = totalFiles + ' / ' + totalFiles + ' 文件';
-    percentEl.textContent = '100%';
+    etaEl.textContent = '';
+    percentEl.textContent = '100.0%';
     speedEl.textContent = '';
     if (xhr.status === 200) {
       const resp = xhr.responseText;
