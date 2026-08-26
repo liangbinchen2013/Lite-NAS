@@ -4,43 +4,136 @@ import secrets
 import time
 import re
 import json
-from http.server import HTTPServer, BaseHTTPRequestHandler
+import shutil
+from http.server import BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
+from http.server import HTTPServer
 from urllib.parse import parse_qs, urlparse, unquote, quote
 import mimetypes
 
 
-def parse_multipart(content_type, body):
-    boundary = None
-    m = re.search(r'boundary=(.+)', content_type)
-    if m:
-        boundary = m.group(1).strip()
-    if not boundary:
-        return None, None
+CHUNK_SIZE = 65536
 
-    boundary_bytes = boundary.encode()
-    parts = body.split(b'--' + boundary_bytes)
-    filename = None
-    file_data = None
 
-    for part in parts:
-        if b'Content-Disposition' not in part:
-            continue
-        header_end = part.find(b'\r\n\r\n')
-        if header_end == -1:
-            continue
-        headers_raw = part[:header_end].decode('utf-8', errors='replace')
-        data = part[header_end + 4:]
-        if data.endswith(b'\r\n'):
-            data = data[:-2]
+class LengthLimitedReader:
+    def __init__(self, rfile, limit):
+        self._rfile = rfile
+        self._remaining = limit
 
-        name_match = re.search(r'name="([^"]+)"', headers_raw)
-        fname_match = re.search(r'filename="([^"]+)"', headers_raw)
-        if fname_match and name_match and name_match.group(1) == 'file':
-            filename = fname_match.group(1)
-            file_data = data
+    def read(self, n=-1):
+        if self._remaining <= 0:
+            return b''
+        to_read = n if n > 0 else self._remaining
+        to_read = min(to_read, self._remaining)
+        chunk = self._rfile.read(to_read)
+        self._remaining -= len(chunk)
+        return chunk
+
+
+def parse_multipart_streaming(limited_reader, boundary, target_dir):
+    delimiter = b'\r\n--' + boundary.encode()
+    delim_len = len(delimiter)
+    buf = b''
+
+    def read_bytes(n):
+        nonlocal buf
+        while len(buf) < n:
+            chunk = limited_reader.read(min(CHUNK_SIZE, n - len(buf)))
+            if not chunk:
+                break
+            buf += chunk
+        result = buf[:n]
+        buf = buf[n:]
+        return result
+
+    def read_until(marker):
+        nonlocal buf
+        while True:
+            pos = buf.find(marker)
+            if pos >= 0:
+                result = buf[:pos + len(marker)]
+                buf = buf[pos + len(marker):]
+                return result
+            chunk = limited_reader.read(CHUNK_SIZE)
+            if not chunk:
+                result = buf
+                buf = b''
+                return result
+            buf += chunk
+
+    initial = b'--' + boundary.encode() + b'\r\n'
+    got = read_bytes(len(initial))
+    if got != initial:
+        return []
+
+    files = []
+
+    while True:
+        header_data = read_until(b'\r\n\r\n')
+        headers_raw = header_data[:-4].decode('utf-8', errors='replace')
+
+        fname_match = re.search(r'filename="([^"]*)"', headers_raw)
+        if not fname_match or not fname_match.group(1):
+            pos = buf.find(delimiter)
+            if pos >= 0:
+                buf = buf[pos + delim_len:]
+            else:
+                while True:
+                    chunk = limited_reader.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    pos = buf.find(delimiter)
+                    if pos >= 0:
+                        buf = buf[pos + delim_len:]
+                        break
+            next_2 = read_bytes(2)
+            if next_2 == b'--':
+                read_bytes(2)
             break
 
-    return filename, file_data
+        filename = os.path.basename(fname_match.group(1))
+        filepath = os.path.join(target_dir, filename)
+        total = 0
+
+        with open(filepath, 'wb') as f:
+            while True:
+                pos = buf.find(delimiter)
+                if pos >= 0:
+                    data = buf[:pos]
+                    if data.endswith(b'\r\n'):
+                        data = data[:-2]
+                    f.write(data)
+                    total += len(data)
+                    buf = buf[pos + delim_len:]
+                    break
+
+                write_up_to = max(0, len(buf) - delim_len)
+                if write_up_to > 0:
+                    f.write(buf[:write_up_to])
+                    total += write_up_to
+                    buf = buf[write_up_to:]
+
+                chunk = limited_reader.read(CHUNK_SIZE)
+                if not chunk:
+                    data = buf
+                    if data.endswith(b'\r\n'):
+                        data = data[:-2]
+                    f.write(data)
+                    total += len(data)
+                    buf = b''
+                    break
+                buf += chunk
+
+        files.append(filename)
+
+
+        next_2 = read_bytes(2)
+        if next_2 == b'--':
+            read_bytes(2)
+            break
+
+    return files
 
 
 HOST = "127.0.0.1"
@@ -67,7 +160,7 @@ def md5_hash(password):
 
 def verify_user(username, password):
     config = load_config()
-    return (username == config["username"] and 
+    return (username == config["username"] and
             md5_hash(password) == config["password"])
 
 
@@ -119,106 +212,136 @@ def load_template(name):
         return f.read()
 
 
-LOGIN_HTML = ""
+def safe_path(rel_path):
+    rel_path = rel_path.strip("/")
+    if not rel_path:
+        return STORAGE_DIR
+    parts = [p for p in rel_path.split("/") if p and p != "." and p != ".."]
+    fp = os.path.join(STORAGE_DIR, *parts) if parts else STORAGE_DIR
+    real_storage = os.path.realpath(STORAGE_DIR)
+    real_fp = os.path.realpath(fp)
+    if not real_fp.startswith(real_storage):
+        return None
+    return fp
 
 
 def get_file_ext_type(name):
     ext = os.path.splitext(name)[1].lower()
     type_map = {
-        ".cpp": ("cpp", "C++ Source File"),
-        ".c": ("c", "C Source File"),
-        ".h": ("h", "Header File"),
-        ".py": ("py", "Python File"),
-        ".js": ("js", "JavaScript File"),
-        ".html": ("html", "HTML File"),
-        ".css": ("css", "CSS File"),
-        ".json": ("json", "JSON File"),
-        ".txt": ("txt", "Text File"),
-        ".md": ("md", "Markdown File"),
-        ".exe": ("exe", "Application"),
-        ".msi": ("msi", "Installer"),
-        ".zip": ("zip", "ZIP Archive"),
-        ".rar": ("rar", "RAR Archive"),
-        ".7z": ("7z", "7-Zip Archive"),
-        ".jpg": ("jpg", "JPEG Image"),
-        ".jpeg": ("jpeg", "JPEG Image"),
-        ".png": ("png", "PNG Image"),
-        ".gif": ("gif", "GIF Image"),
-        ".bmp": ("bmp", "Bitmap Image"),
-        ".mp3": ("mp3", "MP3 Audio"),
-        ".mp4": ("mp4", "MP4 Video"),
-        ".avi": ("avi", "AVI Video"),
-        ".mkv": ("mkv", "MKV Video"),
-        ".doc": ("doc", "Word Document"),
-        ".docx": ("docx", "Word Document"),
-        ".xls": ("xls", "Excel Spreadsheet"),
-        ".xlsx": ("xlsx", "Excel Spreadsheet"),
-        ".ppt": ("ppt", "PowerPoint Presentation"),
-        ".pptx": ("pptx", "PowerPoint Presentation"),
-        ".pdf": ("pdf", "PDF Document"),
-        ".in": ("in", "IN File"),
-        ".out": ("out", "OUT File"),
-        ".log": ("log", "Log File"),
-        ".xml": ("xml", "XML File"),
-        ".yaml": ("yaml", "YAML File"),
-        ".yml": ("yml", "YAML File"),
-        ".toml": ("toml", "TOML File"),
-        ".sh": ("sh", "Shell Script"),
-        ".bat": ("bat", "Batch File"),
-        ".cmd": ("cmd", "Command File"),
-        ".java": ("java", "Java File"),
-        ".rs": ("rs", "Rust File"),
-        ".go": ("go", "Go File"),
-        ".ts": ("ts", "TypeScript File"),
-        ".tsx": ("tsx", "TypeScript React File"),
-        ".jsx": ("jsx", "React File"),
-        ".vue": ("vue", "Vue File"),
-        ".sql": ("sql", "SQL File"),
-        ".csv": ("csv", "CSV File"),
+        ".cpp": "C++ Source File", ".c": "C Source File", ".h": "Header File",
+        ".py": "Python File", ".js": "JavaScript File", ".html": "HTML File",
+        ".css": "CSS File", ".json": "JSON File", ".txt": "Text File",
+        ".md": "Markdown File", ".exe": "Application", ".msi": "Installer",
+        ".zip": "ZIP Archive", ".rar": "RAR Archive", ".7z": "7-Zip Archive",
+        ".jpg": "JPEG Image", ".jpeg": "JPEG Image", ".png": "PNG Image",
+        ".gif": "GIF Image", ".bmp": "Bitmap Image", ".mp3": "MP3 Audio",
+        ".mp4": "MP4 Video", ".avi": "AVI Video", ".mkv": "MKV Video",
+        ".doc": "Word Document", ".docx": "Word Document",
+        ".xls": "Excel Spreadsheet", ".xlsx": "Excel Spreadsheet",
+        ".ppt": "PowerPoint", ".pptx": "PowerPoint", ".pdf": "PDF Document",
+        ".in": "IN File", ".out": "OUT File", ".log": "Log File",
+        ".xml": "XML File", ".yaml": "YAML File", ".yml": "YAML File",
+        ".toml": "TOML File", ".sh": "Shell Script", ".bat": "Batch File",
+        ".java": "Java File", ".rs": "Rust File", ".go": "Go File",
+        ".ts": "TypeScript File", ".sql": "SQL File", ".csv": "CSV File",
     }
-    if ext in type_map:
-        return type_map[ext]
-    return ("file", ext.upper().lstrip(".") + " File" if ext else "File")
+    return type_map.get(ext, ext.upper().lstrip(".") + " File" if ext else "File")
 
 
-def get_file_list_html(username):
-    files = []
-    if os.path.exists(STORAGE_DIR):
-        for f in sorted(os.listdir(STORAGE_DIR)):
-            fp = os.path.join(STORAGE_DIR, f)
-            if os.path.isfile(fp):
+def build_breadcrumb(rel_path):
+    parts = [p for p in rel_path.strip("/").split("/") if p]
+    crumbs = [{"name": "根目录", "path": ""}]
+    acc = ""
+    for p in parts:
+        acc = acc + "/" + p if acc else p
+        crumbs.append({"name": p, "path": acc})
+    return crumbs
+
+
+def get_file_list_html(username, rel_path=""):
+    current_dir = safe_path(rel_path)
+    if not current_dir or not os.path.isdir(current_dir):
+        return None
+
+    items = []
+    if os.path.exists(current_dir):
+        for f in sorted(os.listdir(current_dir)):
+            fp = os.path.join(current_dir, f)
+            if os.path.isdir(fp):
+                items.append({"name": f, "is_dir": True, "size": get_dir_size(fp),
+                              "mtime": os.path.getmtime(fp), "type": "文件夹"})
+            else:
                 size = os.path.getsize(fp)
-                mtime = os.path.getmtime(fp)
-                date_str = time.strftime("%Y/%m/%d %H:%M", time.localtime(mtime))
-                _, type_name = get_file_ext_type(f)
-                files.append((f, format_size(size), date_str, type_name))
+                type_name = get_file_ext_type(f)
+                items.append({"name": f, "is_dir": False, "size": size,
+                              "mtime": os.path.getmtime(fp), "type": type_name})
 
     total_size = get_dir_size(STORAGE_DIR)
+    breadcrumb = build_breadcrumb(rel_path)
 
     file_rows = ""
-    for name, size, date, type_name in files:
-        encoded_name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        url_name = quote(name)
-        file_rows += f"""
+    for item in items:
+        encoded_name = item["name"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        url_name = quote(item["name"])
+        date_str = time.strftime("%Y/%m/%d %H:%M", time.localtime(item["mtime"]))
+
+        if item["is_dir"]:
+            child_path = rel_path + "/" + item["name"] if rel_path else item["name"]
+            url_child = quote(child_path, safe="")
+            file_rows += f"""
         <tr>
-          <td><a href="/download/{url_name}" class="file-link">{encoded_name}</a></td>
-          <td>{date}</td>
-          <td>{type_name}</td>
-          <td>{size}</td>
+          <td><a href="/folder/{url_child}" class="file-link folder-link">{encoded_name}</a></td>
+          <td>{date_str}</td>
+          <td>文件夹</td>
+          <td>-</td>
           <td class="action-cell">
-            <a href="/download/{url_name}" class="btn btn-download" title="下载">下载</a>
+            <form method="POST" action="/delete" style="display:inline" onsubmit="return confirm('确定删除文件夹 {encoded_name} 及其所有内容吗？')">
+              <input type="hidden" name="filename" value="{quote(item['name'])}">
+              <input type="hidden" name="is_dir" value="1">
+              <input type="hidden" name="current_path" value="{quote(rel_path, safe='')}">
+              <button type="submit" class="btn btn-delete" title="删除">删除</button>
+            </form>
+          </td>
+        </tr>"""
+        else:
+            file_path = rel_path + "/" + item["name"] if rel_path else item["name"]
+            url_file = quote(file_path, safe="")
+            file_rows += f"""
+        <tr>
+          <td><a href="/download/{url_file}" class="file-link">{encoded_name}</a></td>
+          <td>{date_str}</td>
+          <td>{item['type']}</td>
+          <td>{format_size(item['size'])}</td>
+          <td class="action-cell">
+            <a href="/download/{url_file}" class="btn btn-download" title="下载">下载</a>
             <form method="POST" action="/delete" style="display:inline" onsubmit="return confirm('确定删除 {encoded_name} 吗？')">
-              <input type="hidden" name="filename" value="{url_name}">
+              <input type="hidden" name="filename" value="{quote(item['name'])}">
+              <input type="hidden" name="is_dir" value="0">
+              <input type="hidden" name="current_path" value="{quote(rel_path, safe='')}">
               <button type="submit" class="btn btn-delete" title="删除">删除</button>
             </form>
           </td>
         </tr>"""
 
-    if not files:
-        file_rows = '<tr><td colspan="5" class="empty">暂无文件，请上传</td></tr>'
+    if not items:
+        file_rows = '<tr><td colspan="5" class="empty">此文件夹为空</td></tr>'
+
+    breadcrumb_html = ""
+    for i, crumb in enumerate(breadcrumb):
+        if i > 0:
+            breadcrumb_html += '<span class="sep">/</span>'
+        if crumb["path"]:
+            url_crumb = quote(crumb["path"], safe="")
+            breadcrumb_html += f'<a href="/folder/{url_crumb}" class="crumb-link">{crumb["name"]}</a>'
+        else:
+            breadcrumb_html += f'<a href="/" class="crumb-link">{crumb["name"]}</a>'
 
     html = load_template("index")
-    return html.replace("{{username}}", username).replace("{{storage}}", format_size(total_size)).replace("{{file_rows}}", file_rows)
+    return (html.replace("{{username}}", username)
+                .replace("{{storage}}", format_size(total_size))
+                .replace("{{file_rows}}", file_rows)
+                .replace("{{breadcrumb}}", breadcrumb_html)
+                .replace("{{current_path}}", quote(rel_path, safe="")))
 
 
 class NASHandler(BaseHTTPRequestHandler):
@@ -227,10 +350,9 @@ class NASHandler(BaseHTTPRequestHandler):
 
     def handle(self):
         try:
-            super().handle()
-        except ConnectionAbortedError:
-            pass
-        except BrokenPipeError:
+            self.close_connection = True
+            self.handle_one_request()
+        except (ConnectionAbortedError, BrokenPipeError):
             pass
         except Exception:
             pass
@@ -271,8 +393,7 @@ class NASHandler(BaseHTTPRequestHandler):
 
     def is_authenticated(self):
         token = self.get_cookie("session")
-        valid, username = is_valid_session(token)
-        return valid, username
+        return is_valid_session(token)
 
     def handle_login(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -305,19 +426,30 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_text("Bad request", 400)
             return
 
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length)
+        m = re.search(r'boundary=([^\s;]+)', content_type)
+        if not m:
+            self.send_text("No boundary", 400)
+            return
+        boundary = m.group(1).strip().strip('"')
 
-        filename, file_data = parse_multipart(content_type, body)
-        if filename and file_data:
-            os.makedirs(STORAGE_DIR, exist_ok=True)
-            filename = os.path.basename(filename)
-            filepath = os.path.join(STORAGE_DIR, filename)
-            with open(filepath, "wb") as f:
-                f.write(file_data)
+        length = int(self.headers.get("Content-Length", 0))
+        raw_path = self.headers.get("X-Current-Path", "")
+        current_path = unquote(raw_path) if raw_path else ""
+        target_dir = safe_path(current_path)
+        if not target_dir:
+            self.send_text("Invalid path", 400)
+            return
+        os.makedirs(target_dir, exist_ok=True)
+
+        try:
+            limited = LengthLimitedReader(self.rfile, length)
+            files = parse_multipart_streaming(limited, boundary, target_dir)
+            if not files:
+                self.send_text("No file", 400)
+                return
             self.send_text("OK")
-        else:
-            self.send_text("No file", 400)
+        except Exception:
+            self.send_text("Upload error", 500)
 
     def handle_download(self, filename):
         valid, username = self.is_authenticated()
@@ -325,17 +457,18 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_redirect("/login")
             return
 
-        filepath = os.path.join(STORAGE_DIR, filename)
-        if not os.path.exists(filepath) or not os.path.isfile(filepath):
+        filepath = safe_path(filename)
+        if not filepath or not os.path.exists(filepath) or not os.path.isfile(filepath):
             self.send_text("File not found", 404)
             return
 
         try:
-            mime, _ = mimetypes.guess_type(filename)
+            mime, _ = mimetypes.guess_type(filepath)
             if mime is None:
                 mime = "application/octet-stream"
 
-            encoded_filename = quote(filename)
+            basename = os.path.basename(filepath)
+            encoded_filename = quote(basename)
             self.send_response(200)
             self.send_header("Content-Type", mime)
             self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{encoded_filename}")
@@ -354,18 +487,58 @@ class NASHandler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"Download error: {e}")
 
-    def handle_delete(self, filename):
+    def handle_delete(self):
         valid, username = self.is_authenticated()
         if not valid:
             self.send_redirect("/login")
             return
 
-        filepath = os.path.join(STORAGE_DIR, filename)
-        if os.path.exists(filepath) and os.path.isfile(filepath):
-            os.remove(filepath)
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode("utf-8")
+        params = parse_qs(body)
+        name = params.get("filename", [""])[0]
+        is_dir = params.get("is_dir", ["0"])[0] == "1"
+        current_path = unquote(params.get("current_path", [""])[0])
 
+        if not name:
+            self.send_redirect(f"/folder/{quote(current_path, safe='')}" if current_path else "/")
+            return
+
+        target = safe_path(current_path + "/" + name if current_path else name)
+        if target and os.path.exists(target):
+            if is_dir:
+                shutil.rmtree(target, ignore_errors=True)
+            else:
+                try:
+                    os.remove(target)
+                except IsADirectoryError:
+                    shutil.rmtree(target, ignore_errors=True)
+
+        redir = f"/folder/{quote(current_path, safe='')}" if current_path else "/"
         self.send_response(302)
-        self.send_header("Location", "/")
+        self.send_header("Location", redir)
+        self.end_headers()
+
+    def handle_mkdir(self):
+        valid, username = self.is_authenticated()
+        if not valid:
+            self.send_redirect("/login")
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode("utf-8")
+        params = parse_qs(body)
+        folder_name = params.get("folder_name", [""])[0].strip()
+        current_path = unquote(params.get("current_path", [""])[0])
+
+        if folder_name and not "/" in folder_name and not "\\" in folder_name:
+            target = safe_path(current_path + "/" + folder_name if current_path else folder_name)
+            if target:
+                os.makedirs(target, exist_ok=True)
+
+        redir = f"/folder/{quote(current_path, safe='')}" if current_path else "/"
+        self.send_response(302)
+        self.send_header("Location", redir)
         self.end_headers()
 
     def do_GET(self):
@@ -377,6 +550,17 @@ class NASHandler(BaseHTTPRequestHandler):
                 self.send_redirect("/login")
                 return
             self.send_html(get_file_list_html(username))
+        elif path.startswith("/folder/"):
+            valid, username = self.is_authenticated()
+            if not valid:
+                self.send_redirect("/login")
+                return
+            rel_path = unquote(path[len("/folder/"):])
+            html = get_file_list_html(username, rel_path)
+            if html is None:
+                self.send_redirect("/")
+                return
+            self.send_html(html)
         elif path == "/login":
             valid, username = self.is_authenticated()
             if valid:
@@ -405,11 +589,9 @@ class NASHandler(BaseHTTPRequestHandler):
         elif path == "/upload":
             self.handle_upload()
         elif path == "/delete":
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length).decode("utf-8")
-            params = parse_qs(body)
-            filename = params.get("filename", [""])[0]
-            self.handle_delete(filename)
+            self.handle_delete()
+        elif path == "/mkdir":
+            self.handle_mkdir()
         else:
             self.send_text("Not found", 404)
 
@@ -417,7 +599,10 @@ class NASHandler(BaseHTTPRequestHandler):
 def main():
     os.makedirs(STORAGE_DIR, exist_ok=True)
 
-    server = HTTPServer((HOST, PORT), NASHandler)
+    class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+
+    server = ThreadedHTTPServer((HOST, PORT), NASHandler)
     print(f"Lite-NAS server running at http://{HOST}:{PORT}")
     print("Press Ctrl+C to stop.")
     try:

@@ -17,20 +17,31 @@ header h1 { font-size: 20px; color: #333; }
 .storage-card { background: #fff; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
 .storage-label { color: #666; font-size: 14px; }
 .storage-value { color: #333; font-size: 20px; font-weight: 600; }
-.upload-zone { background: #fff; border: 2px dashed #ccc; border-radius: 8px; padding: 32px; text-align: center; margin-bottom: 20px; transition: all 0.2s; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.breadcrumb { background: #fff; border-radius: 8px; padding: 10px 20px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); font-size: 14px; display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
+.crumb-link { color: #3b82f6; text-decoration: none; }
+.crumb-link:hover { text-decoration: underline; }
+.sep { color: #999; margin: 0 4px; }
+.toolbar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
+.upload-zone { background: #fff; border: 2px dashed #ccc; border-radius: 8px; padding: 24px; text-align: center; transition: all 0.2s; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.08); flex: 1; min-width: 300px; }
 .upload-zone:hover, .upload-zone.dragover { border-color: #3b82f6; background: #f8fbff; }
-.upload-zone p { color: #888; margin-top: 8px; font-size: 14px; }
+.upload-zone p { color: #888; font-size: 14px; }
 input[type="file"] { display: none; }
-.upload-btn { display: inline-block; padding: 8px 20px; background: #3b82f6; color: white; border: none; border-radius: 4px; font-size: 13px; cursor: pointer; margin-top: 12px; transition: background 0.2s; }
+.upload-btn { display: inline-block; padding: 8px 20px; background: #3b82f6; color: white; border: none; border-radius: 4px; font-size: 13px; cursor: pointer; margin-top: 8px; transition: background 0.2s; }
 .upload-btn:hover { background: #2563eb; }
+.mkdir-box { display: flex; gap: 8px; align-items: center; }
+.mkdir-input { padding: 7px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; width: 180px; outline: none; }
+.mkdir-input:focus { border-color: #3b82f6; }
+.mkdir-btn { padding: 7px 16px; background: #10b981; color: white; border: none; border-radius: 4px; font-size: 13px; cursor: pointer; }
+.mkdir-btn:hover { background: #059669; }
 .file-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-.file-table th { text-align: left; padding: 10px 16px; background: #f8f8f8; color: #666; font-weight: 500; font-size: 13px; border-bottom: 1px solid #e0e0e0; cursor: pointer; user-select: none; }
-.file-table th:hover { background: #f0f0f0; }
+.file-table th { text-align: left; padding: 10px 16px; background: #f8f8f8; color: #666; font-weight: 500; font-size: 13px; border-bottom: 1px solid #e0e0e0; }
 .file-table td { padding: 8px 16px; border-bottom: 1px solid #f0f0f0; font-size: 13px; color: #444; }
 .file-table tr:hover td { background: #f5f8ff; }
 .file-table tr:last-child td { border-bottom: none; }
 .file-link { color: #333; text-decoration: none; }
 .file-link:hover { color: #3b82f6; }
+.folder-link { font-weight: 500; }
+.folder-link::before { content: "📁 "; }
 .empty { color: #999; text-align: center; padding: 40px 20px !important; }
 .action-cell { white-space: nowrap; }
 .btn { display: inline-block; padding: 3px 10px; border: none; border-radius: 3px; background: transparent; cursor: pointer; font-size: 12px; transition: all 0.15s; }
@@ -67,20 +78,28 @@ input[type="file"] { display: none; }
     <span class="storage-value">{{storage}}</span>
   </div>
 
-  <div class="upload-zone" id="uploadZone">
-    <p>将文件拖拽到此处，或</p>
-    <input type="file" id="fileInput" multiple>
-    <button class="upload-btn" onclick="document.getElementById('fileInput').click()">选择文件</button>
-    <div class="progress-bar" id="progressBar">
-      <div class="progress-track" id="progressTrack">
-        <div class="progress-fill" id="progressFill"></div>
+  <div class="breadcrumb">{{breadcrumb}}</div>
+
+  <div class="toolbar">
+    <div class="upload-zone" id="uploadZone">
+      <p>将文件拖拽到此处，或</p>
+      <input type="file" id="fileInput" multiple>
+      <button class="upload-btn" onclick="document.getElementById('fileInput').click()">选择文件</button>
+      <div class="progress-bar" id="progressBar">
+        <div class="progress-track" id="progressTrack">
+          <div class="progress-fill" id="progressFill"></div>
+        </div>
+        <div class="progress-info">
+          <span id="progressSize">0 KB / 0 KB</span>
+          <span id="progressSpeed"></span>
+          <span id="progressCount">0 / 0 文件</span>
+          <span class="progress-percent" id="progressPercent">0%</span>
+        </div>
       </div>
-      <div class="progress-info">
-        <span id="progressSize">0 KB / 0 KB</span>
-        <span id="progressSpeed"></span>
-        <span id="progressCount">0 / 0 文件</span>
-        <span class="progress-percent" id="progressPercent">0%</span>
-      </div>
+    </div>
+    <div class="mkdir-box">
+      <input type="text" class="mkdir-input" id="folderName" placeholder="新文件夹名称">
+      <button class="mkdir-btn" onclick="createFolder()">新建文件夹</button>
     </div>
   </div>
 
@@ -88,7 +107,7 @@ input[type="file"] { display: none; }
     <thead>
       <tr>
         <th style="width:35%">名称</th>
-        <th style="width:20%">上传时间</th>
+        <th style="width:20%">修改时间</th>
         <th style="width:20%">类型</th>
         <th style="width:10%">大小</th>
         <th style="width:15%; text-align:right">操作</th>
@@ -110,6 +129,7 @@ const sizeEl = document.getElementById('progressSize');
 const countEl = document.getElementById('progressCount');
 const percentEl = document.getElementById('progressPercent');
 const speedEl = document.getElementById('progressSpeed');
+const currentPath = '{{current_path}}';
 
 function formatBytes(bytes) {
   if (bytes < 1024) return bytes + ' B';
@@ -136,16 +156,29 @@ function setScrolling(on) {
   else track.classList.remove('scrolling');
 }
 
-function uploadFiles(files) {
-  if (files.length === 0) return;
-  
-  const totalFiles = files.length;
-  let uploadedFiles = 0;
+function createFolder() {
+  const name = document.getElementById('folderName').value.trim();
+  if (!name) { showToast('请输入文件夹名称', 'error'); return; }
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = '/mkdir';
+  const input1 = document.createElement('input');
+  input1.type = 'hidden'; input1.name = 'folder_name'; input1.value = name;
+  const input2 = document.createElement('input');
+  input2.type = 'hidden'; input2.name = 'current_path'; input2.value = currentPath;
+  form.appendChild(input1);
+  form.appendChild(input2);
+  document.body.appendChild(form);
+  form.submit();
+}
+
+function uploadFiles(fileList) {
+  if (fileList.length === 0) return;
+
+  const totalFiles = fileList.length;
   let totalBytes = 0;
-  let loadedBytes = 0;
-  
-  for (const f of files) totalBytes += f.size;
-  
+  for (const f of fileList) totalBytes += f.size;
+
   bar.style.display = 'block';
   fill.style.width = '0%';
   sizeEl.textContent = '0 / ' + formatBytes(totalBytes);
@@ -153,82 +186,56 @@ function uploadFiles(files) {
   percentEl.textContent = '0%';
   speedEl.textContent = '';
   setScrolling(true);
-  
-  let index = 0;
-  let startTime = Date.now();
-  let lastLoaded = 0;
-  let lastTime = startTime;
-  
-  function updateProgress(currentLoaded) {
-    const now = Date.now();
-    const elapsed = (now - lastTime) / 1000;
-    if (elapsed >= 0.1) {
-      const bytesPerSec = (currentLoaded - lastLoaded) / elapsed;
-      speedEl.textContent = formatSpeed(bytesPerSec);
-      lastLoaded = currentLoaded;
-      lastTime = now;
-    }
-    
-    const percent = Math.round((currentLoaded / totalBytes) * 100);
-    fill.style.width = percent + '%';
-    sizeEl.textContent = formatBytes(currentLoaded) + ' / ' + formatBytes(totalBytes);
-    countEl.textContent = uploadedFiles + ' / ' + totalFiles + ' 文件';
-    percentEl.textContent = percent + '%';
-  }
-  
-  function uploadNext() {
-    if (index >= files.length) {
-      setScrolling(false);
-      fill.style.width = '100%';
-      sizeEl.textContent = formatBytes(totalBytes) + ' / ' + formatBytes(totalBytes);
+
+  const fd = new FormData();
+  for (const f of fileList) fd.append('file', f);
+
+  const xhr = new XMLHttpRequest();
+  const startTime = Date.now();
+
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) {
+      const elapsed = (Date.now() - startTime) / 1000;
+      const speed = elapsed > 0 ? e.loaded / elapsed : 0;
+      const percent = Math.round((e.loaded / e.total) * 100);
+      fill.style.width = percent + '%';
+      sizeEl.textContent = formatBytes(e.loaded) + ' / ' + formatBytes(e.total);
       countEl.textContent = totalFiles + ' / ' + totalFiles + ' 文件';
-      percentEl.textContent = '100%';
-      speedEl.textContent = '';
+      percentEl.textContent = percent + '%';
+      speedEl.textContent = formatSpeed(speed);
+    }
+  };
+
+  xhr.onload = () => {
+    setScrolling(false);
+    fill.style.width = '100%';
+    sizeEl.textContent = formatBytes(totalBytes) + ' / ' + formatBytes(totalBytes);
+    countEl.textContent = totalFiles + ' / ' + totalFiles + ' 文件';
+    percentEl.textContent = '100%';
+    speedEl.textContent = '';
+    if (xhr.status === 200) {
       showToast('全部上传完成', 'success');
       setTimeout(() => location.reload(), 300);
-      return;
+    } else {
+      showToast('上传失败: ' + xhr.responseText, 'error');
     }
-    
-    const file = files[index];
-    const fd = new FormData();
-    fd.append('file', file);
-    const xhr = new XMLHttpRequest();
-    
-    const fileStart = loadedBytes;
-    
-    xhr.upload.onprogress = e => {
-      if (e.lengthComputable) {
-        updateProgress(fileStart + e.loaded);
-      }
-    };
-    
-    xhr.onload = () => {
-      loadedBytes += file.size;
-      uploadedFiles++;
-      index++;
-      if (xhr.status !== 200) showToast(file.name + ' 上传失败', 'error');
-      uploadNext();
-    };
-    
-    xhr.onerror = () => {
-      showToast(file.name + ' 上传出错', 'error');
-      loadedBytes += file.size;
-      uploadedFiles++;
-      index++;
-      uploadNext();
-    };
-    
-    xhr.open('POST', '/upload');
-    xhr.send(fd);
-  }
-  
-  uploadNext();
+  };
+
+  xhr.onerror = () => {
+    setScrolling(false);
+    showToast('上传出错', 'error');
+  };
+
+  xhr.open('POST', '/upload');
+  xhr.setRequestHeader('X-Current-Path', currentPath);
+  xhr.send(fd);
 }
 
 input.addEventListener('change', () => { uploadFiles(input.files); input.value = ''; });
 zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
 zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
 zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('dragover'); uploadFiles(e.dataTransfer.files); });
+document.getElementById('folderName').addEventListener('keydown', e => { if (e.key === 'Enter') createFolder(); });
 </script>
 </body>
 </html>
