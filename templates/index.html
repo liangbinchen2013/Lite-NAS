@@ -28,6 +28,9 @@ header h1 { font-size: 20px; color: #333; }
 input[type="file"] { display: none; }
 .upload-btn { display: inline-block; padding: 8px 20px; background: #3b82f6; color: white; border: none; border-radius: 4px; font-size: 13px; cursor: pointer; margin-top: 8px; transition: background 0.2s; }
 .upload-btn:hover { background: #2563eb; }
+.upload-btn-group { display: inline-flex; gap: 8px; margin-top: 8px; }
+.upload-btn-folder { background: #10b981; }
+.upload-btn-folder:hover { background: #059669; }
 .mkdir-box { display: flex; gap: 8px; align-items: center; }
 .mkdir-input { padding: 7px 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; width: 180px; outline: none; }
 .mkdir-input:focus { border-color: #3b82f6; }
@@ -84,7 +87,11 @@ input[type="file"] { display: none; }
     <div class="upload-zone" id="uploadZone">
       <p>将文件拖拽到此处，或</p>
       <input type="file" id="fileInput" multiple>
-      <button class="upload-btn" onclick="document.getElementById('fileInput').click()">选择文件</button>
+      <input type="file" id="folderInput" webkitdirectory multiple style="display:none">
+      <div class="upload-btn-group">
+        <button class="upload-btn" onclick="document.getElementById('fileInput').click()">选择文件</button>
+        <button class="upload-btn upload-btn-folder" onclick="document.getElementById('folderInput').click()">选择文件夹</button>
+      </div>
       <div class="progress-bar" id="progressBar">
         <div class="progress-track" id="progressTrack">
           <div class="progress-fill" id="progressFill"></div>
@@ -122,6 +129,7 @@ input[type="file"] { display: none; }
 <script>
 const zone = document.getElementById('uploadZone');
 const input = document.getElementById('fileInput');
+const folderInput = document.getElementById('folderInput');
 const bar = document.getElementById('progressBar');
 const track = document.getElementById('progressTrack');
 const fill = document.getElementById('progressFill');
@@ -188,7 +196,17 @@ function uploadFiles(fileList) {
   setScrolling(true);
 
   const fd = new FormData();
-  for (const f of fileList) fd.append('file', f);
+  for (const f of fileList) {
+    let path;
+    if (f._relativePath) {
+      path = f._relativePath;
+    } else if (f.webkitRelativePath) {
+      path = f.webkitRelativePath;
+    } else {
+      path = f.name;
+    }
+    fd.append('file', f, path);
+  }
 
   const xhr = new XMLHttpRequest();
   const startTime = Date.now();
@@ -214,7 +232,12 @@ function uploadFiles(fileList) {
     percentEl.textContent = '100%';
     speedEl.textContent = '';
     if (xhr.status === 200) {
-      showToast('全部上传完成', 'success');
+      const resp = xhr.responseText;
+      if (resp && resp !== 'OK') {
+        showToast(resp, 'error');
+      } else {
+        showToast('全部上传完成', 'success');
+      }
       setTimeout(() => location.reload(), 300);
     } else {
       showToast('上传失败: ' + xhr.responseText, 'error');
@@ -232,9 +255,57 @@ function uploadFiles(fileList) {
 }
 
 input.addEventListener('change', () => { uploadFiles(input.files); input.value = ''; });
+folderInput.addEventListener('change', () => { uploadFiles(folderInput.files); folderInput.value = ''; });
 zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
 zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
-zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('dragover'); uploadFiles(e.dataTransfer.files); });
+zone.addEventListener('drop', async e => {
+  e.preventDefault();
+  zone.classList.remove('dragover');
+
+  const allFiles = [];
+  const emptyDirs = [];
+
+  async function readEntry(entry, basePath) {
+    if (entry.isFile) {
+      return new Promise((resolve, reject) => {
+        entry.file(file => {
+          file._relativePath = basePath + file.name;
+          allFiles.push(file);
+          resolve();
+        }, reject);
+      });
+    } else if (entry.isDirectory) {
+      const dirReader = entry.createReader();
+      let allEntries = [];
+      let entries;
+      do {
+        entries = await new Promise(resolve => dirReader.readEntries(resolve));
+        allEntries = allEntries.concat(entries);
+      } while (entries.length > 0);
+
+      if (allEntries.length === 0) {
+        emptyDirs.push(basePath + entry.name);
+        return;
+      }
+      for (const child of allEntries) {
+        await readEntry(child, basePath + entry.name + '/');
+      }
+    }
+  }
+
+  const items = e.dataTransfer.items;
+  for (let i = 0; i < items.length; i++) {
+    const entry = items[i].webkitGetAsEntry();
+    if (entry) await readEntry(entry, '');
+  }
+
+  if (emptyDirs.length > 0) {
+    showToast('空文件夹无法上传: ' + emptyDirs.join(', '), 'error');
+  }
+  if (allFiles.length > 0) {
+    uploadFiles(allFiles);
+  }
+});
 document.getElementById('folderName').addEventListener('keydown', e => { if (e.key === 'Enter') createFolder(); });
 </script>
 </body>

@@ -92,11 +92,39 @@ def parse_multipart_streaming(limited_reader, boundary, target_dir):
                 read_bytes(2)
             break
 
-        filename = os.path.basename(fname_match.group(1))
-        filepath = os.path.join(target_dir, filename)
+        full_name = fname_match.group(1)
+
+        safe_parts = []
+        rejected = False
+        for part in full_name.replace('\\', '/').split('/'):
+            if not part or part == '.':
+                continue
+            if part == '..':
+                rejected = True
+                break
+            safe_parts.append(part)
+
+        if rejected or not safe_parts:
+            while True:
+                pos = buf.find(delimiter)
+                if pos >= 0:
+                    buf = buf[pos + delim_len:]
+                    break
+                chunk = limited_reader.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                buf += chunk
+            next_2 = read_bytes(2)
+            if next_2 == b'--':
+                read_bytes(2)
+                break
+            continue
+
+        target_file = os.path.join(target_dir, *safe_parts)
+        os.makedirs(os.path.dirname(target_file), exist_ok=True)
         total = 0
 
-        with open(filepath, 'wb') as f:
+        with open(target_file, 'wb') as f:
             while True:
                 pos = buf.find(delimiter)
                 if pos >= 0:
@@ -125,7 +153,7 @@ def parse_multipart_streaming(limited_reader, boundary, target_dir):
                     break
                 buf += chunk
 
-        files.append(filename)
+        files.append(full_name)
 
 
         next_2 = read_bytes(2)
