@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lite-NAS</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: #f5f5f5; color: #333; min-height: 100vh; }
+.container { max-width: 1000px; margin: 0 auto; padding: 24px; }
+header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding: 16px 20px; background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.header-left { display: flex; align-items: center; gap: 16px; }
+header h1 { font-size: 20px; color: #333; }
+.user-info { color: #666; font-size: 13px; padding: 4px 10px; background: #f0f0f0; border-radius: 4px; }
+.logout { color: #666; text-decoration: none; font-size: 13px; padding: 6px 14px; border: 1px solid #ddd; border-radius: 4px; transition: all 0.2s; }
+.logout:hover { color: #333; border-color: #999; background: #f5f5f5; }
+.storage-card { background: #fff; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.storage-label { color: #666; font-size: 14px; }
+.storage-value { color: #333; font-size: 20px; font-weight: 600; }
+.upload-zone { background: #fff; border: 2px dashed #ccc; border-radius: 8px; padding: 32px; text-align: center; margin-bottom: 20px; transition: all 0.2s; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.upload-zone:hover, .upload-zone.dragover { border-color: #3b82f6; background: #f8fbff; }
+.upload-zone p { color: #888; margin-top: 8px; font-size: 14px; }
+input[type="file"] { display: none; }
+.upload-btn { display: inline-block; padding: 8px 20px; background: #3b82f6; color: white; border: none; border-radius: 4px; font-size: 13px; cursor: pointer; margin-top: 12px; transition: background 0.2s; }
+.upload-btn:hover { background: #2563eb; }
+.file-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.file-table th { text-align: left; padding: 10px 16px; background: #f8f8f8; color: #666; font-weight: 500; font-size: 13px; border-bottom: 1px solid #e0e0e0; cursor: pointer; user-select: none; }
+.file-table th:hover { background: #f0f0f0; }
+.file-table td { padding: 8px 16px; border-bottom: 1px solid #f0f0f0; font-size: 13px; color: #444; }
+.file-table tr:hover td { background: #f5f8ff; }
+.file-table tr:last-child td { border-bottom: none; }
+.file-link { color: #333; text-decoration: none; }
+.file-link:hover { color: #3b82f6; }
+.empty { color: #999; text-align: center; padding: 40px 20px !important; }
+.action-cell { white-space: nowrap; }
+.btn { display: inline-block; padding: 3px 10px; border: none; border-radius: 3px; background: transparent; cursor: pointer; font-size: 12px; transition: all 0.15s; }
+.btn-download { color: #3b82f6; }
+.btn-download:hover { background: #eff6ff; }
+.btn-delete { color: #999; }
+.btn-delete:hover { color: #dc2626; background: #fef2f2; }
+.progress-bar { display: none; height: 3px; background: #e0e0e0; border-radius: 2px; margin-top: 12px; overflow: hidden; }
+.progress-bar .fill { height: 100%; background: #3b82f6; border-radius: 2px; transition: width 0.3s; width: 0%; }
+.toast { position: fixed; top: 20px; right: 20px; padding: 10px 16px; border-radius: 6px; font-size: 13px; z-index: 1000; opacity: 0; transform: translateY(-10px); transition: all 0.3s; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+.toast.error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="header-left">
+      <h1>Lite-NAS</h1>
+      <span class="user-info">{{username}}</span>
+    </div>
+    <a href="/logout" class="logout">退出登录</a>
+  </header>
+
+  <div class="storage-card">
+    <span class="storage-label">已使用空间</span>
+    <span class="storage-value">{{storage}}</span>
+  </div>
+
+  <div class="upload-zone" id="uploadZone">
+    <p>将文件拖拽到此处，或</p>
+    <input type="file" id="fileInput" multiple>
+    <button class="upload-btn" onclick="document.getElementById('fileInput').click()">选择文件</button>
+    <div class="progress-bar" id="progressBar"><div class="fill" id="progressFill"></div></div>
+  </div>
+
+  <table class="file-table">
+    <thead>
+      <tr>
+        <th style="width:35%">名称</th>
+        <th style="width:20%">上传时间</th>
+        <th style="width:20%">类型</th>
+        <th style="width:10%">大小</th>
+        <th style="width:15%; text-align:right">操作</th>
+      </tr>
+    </thead>
+    <tbody>{{file_rows}}</tbody>
+  </table>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const zone = document.getElementById('uploadZone');
+const input = document.getElementById('fileInput');
+const bar = document.getElementById('progressBar');
+const fill = document.getElementById('progressFill');
+
+function showToast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast ' + type + ' show';
+  setTimeout(() => t.className = 'toast', 3000);
+}
+
+function uploadFile(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  const xhr = new XMLHttpRequest();
+  bar.style.display = 'block';
+  fill.style.width = '0%';
+  xhr.upload.onprogress = e => { if (e.lengthComputable) fill.style.width = (e.loaded / e.total * 100) + '%'; };
+  xhr.onload = () => {
+    bar.style.display = 'none';
+    if (xhr.status === 200) { showToast(file.name + ' 上传成功', 'success'); setTimeout(() => location.reload(), 500); }
+    else { showToast('上传失败: ' + xhr.responseText, 'error'); }
+  };
+  xhr.onerror = () => { bar.style.display = 'none'; showToast('上传出错', 'error'); };
+  xhr.open('POST', '/upload');
+  xhr.send(fd);
+}
+
+input.addEventListener('change', () => { for (const f of input.files) uploadFile(f); input.value = ''; });
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragover'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
+zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('dragover'); for (const f of e.dataTransfer.files) uploadFile(f); });
+</script>
+</body>
+</html>

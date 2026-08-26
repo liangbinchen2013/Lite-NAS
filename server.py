@@ -48,6 +48,7 @@ PORT = 8888
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
+TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 
 sessions = {}
 
@@ -112,45 +113,72 @@ def format_size(size):
         return f"{size / (1024*1024*1024):.1f} GB"
 
 
-LOGIN_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Lite-NAS - Login</title>
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-.login-box { background: #1e293b; border-radius: 16px; padding: 48px 40px; width: 380px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); }
-h1 { font-size: 24px; margin-bottom: 8px; color: #f8fafc; }
-.subtitle { color: #94a3b8; margin-bottom: 32px; font-size: 14px; }
-.form-group { margin-bottom: 20px; }
-label { display: block; margin-bottom: 6px; font-size: 14px; color: #cbd5e1; }
-input[type="text"], input[type="password"] { width: 100%; padding: 12px 16px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #f8fafc; font-size: 16px; outline: none; transition: border-color 0.2s; }
-input[type="text"]:focus, input[type="password"]:focus { border-color: #3b82f6; }
-button { width: 100%; padding: 12px; background: #3b82f6; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; transition: background 0.2s; }
-button:hover { background: #2563eb; }
-.error { color: #f87171; margin-bottom: 16px; font-size: 14px; text-align: center; }
-</style>
-</head>
-<body>
-<div class="login-box">
-  <h1>Lite-NAS</h1>
-  <p class="subtitle">请输入用户名和密码以访问文件管理</p>
-  <form method="POST" action="/login">
-    <div class="form-group">
-      <label for="username">用户名</label>
-      <input type="text" id="username" name="username" placeholder="请输入用户名" autofocus>
-    </div>
-    <div class="form-group">
-      <label for="password">密码</label>
-      <input type="password" id="password" name="password" placeholder="请输入密码">
-    </div>
-    <button type="submit">登录</button>
-  </form>
-</div>
-</body>
-</html>"""
+def load_template(name):
+    path = os.path.join(TEMPLATES_DIR, f"{name}.html")
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+LOGIN_HTML = ""
+
+
+def get_file_ext_type(name):
+    ext = os.path.splitext(name)[1].lower()
+    type_map = {
+        ".cpp": ("cpp", "C++ Source File"),
+        ".c": ("c", "C Source File"),
+        ".h": ("h", "Header File"),
+        ".py": ("py", "Python File"),
+        ".js": ("js", "JavaScript File"),
+        ".html": ("html", "HTML File"),
+        ".css": ("css", "CSS File"),
+        ".json": ("json", "JSON File"),
+        ".txt": ("txt", "Text File"),
+        ".md": ("md", "Markdown File"),
+        ".exe": ("exe", "Application"),
+        ".msi": ("msi", "Installer"),
+        ".zip": ("zip", "ZIP Archive"),
+        ".rar": ("rar", "RAR Archive"),
+        ".7z": ("7z", "7-Zip Archive"),
+        ".jpg": ("jpg", "JPEG Image"),
+        ".jpeg": ("jpeg", "JPEG Image"),
+        ".png": ("png", "PNG Image"),
+        ".gif": ("gif", "GIF Image"),
+        ".bmp": ("bmp", "Bitmap Image"),
+        ".mp3": ("mp3", "MP3 Audio"),
+        ".mp4": ("mp4", "MP4 Video"),
+        ".avi": ("avi", "AVI Video"),
+        ".mkv": ("mkv", "MKV Video"),
+        ".doc": ("doc", "Word Document"),
+        ".docx": ("docx", "Word Document"),
+        ".xls": ("xls", "Excel Spreadsheet"),
+        ".xlsx": ("xlsx", "Excel Spreadsheet"),
+        ".ppt": ("ppt", "PowerPoint Presentation"),
+        ".pptx": ("pptx", "PowerPoint Presentation"),
+        ".pdf": ("pdf", "PDF Document"),
+        ".in": ("in", "IN File"),
+        ".out": ("out", "OUT File"),
+        ".log": ("log", "Log File"),
+        ".xml": ("xml", "XML File"),
+        ".yaml": ("yaml", "YAML File"),
+        ".yml": ("yml", "YAML File"),
+        ".toml": ("toml", "TOML File"),
+        ".sh": ("sh", "Shell Script"),
+        ".bat": ("bat", "Batch File"),
+        ".cmd": ("cmd", "Command File"),
+        ".java": ("java", "Java File"),
+        ".rs": ("rs", "Rust File"),
+        ".go": ("go", "Go File"),
+        ".ts": ("ts", "TypeScript File"),
+        ".tsx": ("tsx", "TypeScript React File"),
+        ".jsx": ("jsx", "React File"),
+        ".vue": ("vue", "Vue File"),
+        ".sql": ("sql", "SQL File"),
+        ".csv": ("csv", "CSV File"),
+    }
+    if ext in type_map:
+        return type_map[ext]
+    return ("file", ext.upper().lstrip(".") + " File" if ext else "File")
 
 
 def get_file_list_html(username):
@@ -160,159 +188,36 @@ def get_file_list_html(username):
             fp = os.path.join(STORAGE_DIR, f)
             if os.path.isfile(fp):
                 size = os.path.getsize(fp)
-                mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(fp)))
-                files.append((f, format_size(size), mtime))
+                mtime = os.path.getmtime(fp)
+                date_str = time.strftime("%Y/%m/%d %H:%M", time.localtime(mtime))
+                _, type_name = get_file_ext_type(f)
+                files.append((f, format_size(size), date_str, type_name))
 
     total_size = get_dir_size(STORAGE_DIR)
-    file_count = len(files)
 
     file_rows = ""
-    for name, size, mtime in files:
+    for name, size, date, type_name in files:
         encoded_name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         file_rows += f"""
         <tr>
-          <td class="name-cell">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            <a href="/download/{unquote(name)}" class="file-link">{encoded_name}</a>
-          </td>
+          <td><a href="/download/{unquote(name)}" class="file-link">{encoded_name}</a></td>
+          <td>{date}</td>
+          <td>{type_name}</td>
           <td>{size}</td>
-          <td>{mtime}</td>
           <td class="action-cell">
-            <a href="/download/{unquote(name)}" class="btn btn-download" title="下载">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            </a>
+            <a href="/download/{unquote(name)}" class="btn btn-download" title="下载">下载</a>
             <form method="POST" action="/delete" style="display:inline" onsubmit="return confirm('确定删除 {encoded_name} 吗？')">
               <input type="hidden" name="filename" value="{unquote(name)}">
-              <button type="submit" class="btn btn-delete" title="删除">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-              </button>
+              <button type="submit" class="btn btn-delete" title="删除">删除</button>
             </form>
           </td>
         </tr>"""
 
     if not files:
-        file_rows = '<tr><td colspan="4" class="empty">暂无文件，请上传</td></tr>'
+        file_rows = '<tr><td colspan="5" class="empty">暂无文件，请上传</td></tr>'
 
-    return f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Lite-NAS</title>
-<style>
-* {{ margin: 0; padding: 0; box-sizing: border-box; }}
-body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }}
-.container {{ max-width: 960px; margin: 0 auto; padding: 32px 24px; }}
-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; }}
-.header-left {{ display: flex; align-items: center; gap: 16px; }}
-header h1 {{ font-size: 28px; color: #f8fafc; }}
-.user-info {{ color: #94a3b8; font-size: 14px; padding: 6px 12px; background: #0f172a; border-radius: 6px; }}
-.logout {{ color: #94a3b8; text-decoration: none; font-size: 14px; padding: 8px 16px; border: 1px solid #334155; border-radius: 8px; transition: all 0.2s; }}
-.logout:hover {{ color: #f8fafc; border-color: #64748b; }}
-.storage-card {{ background: #1e293b; border-radius: 12px; padding: 20px 24px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; }}
-.storage-label {{ color: #94a3b8; font-size: 14px; }}
-.storage-value {{ color: #f8fafc; font-size: 24px; font-weight: 600; }}
-.upload-zone {{ background: #1e293b; border: 2px dashed #334155; border-radius: 12px; padding: 40px; text-align: center; margin-bottom: 24px; transition: all 0.2s; cursor: pointer; }}
-.upload-zone:hover, .upload-zone.dragover {{ border-color: #3b82f6; background: #1e293b; }}
-.upload-zone p {{ color: #94a3b8; margin-top: 12px; font-size: 14px; }}
-.upload-icon {{ color: #64748b; }}
-input[type="file"] {{ display: none; }}
-.upload-btn {{ display: inline-block; padding: 10px 24px; background: #3b82f6; color: white; border: none; border-radius: 8px; font-size: 14px; cursor: pointer; margin-top: 16px; transition: background 0.2s; }}
-.upload-btn:hover {{ background: #2563eb; }}
-.file-table {{ width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 12px; overflow: hidden; }}
-.file-table th {{ text-align: left; padding: 14px 20px; background: #1e293b; color: #94a3b8; font-weight: 500; font-size: 13px; text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid #334155; }}
-.file-table td {{ padding: 12px 20px; border-bottom: 1px solid #1e293b; font-size: 14px; }}
-.file-table tr:hover td {{ background: #253348; }}
-.file-table tr:last-child td {{ border-bottom: none; }}
-.name-cell {{ display: flex; align-items: center; gap: 10px; }}
-.file-link {{ color: #e2e8f0; text-decoration: none; transition: color 0.2s; }}
-.file-link:hover {{ color: #60a5fa; }}
-.empty {{ color: #64748b; text-align: center; padding: 40px 20px !important; }}
-.action-cell {{ width: 80px; text-align: right; }}
-.action-cell form {{ display: inline; }}
-.btn {{ display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; border: none; border-radius: 6px; background: transparent; cursor: pointer; transition: all 0.2s; }}
-.btn-download {{ color: #94a3b8; }}
-.btn-download:hover {{ color: #3b82f6; background: rgba(59,130,246,0.1); }}
-.btn-delete {{ color: #94a3b8; }}
-.btn-delete:hover {{ color: #f87171; background: rgba(248,113,113,0.1); }}
-.progress-bar {{ display: none; height: 4px; background: #334155; border-radius: 2px; margin-top: 16px; overflow: hidden; }}
-.progress-bar .fill {{ height: 100%; background: #3b82f6; border-radius: 2px; transition: width 0.3s; width: 0%; }}
-.toast {{ position: fixed; top: 24px; right: 24px; padding: 12px 20px; border-radius: 8px; font-size: 14px; z-index: 1000; opacity: 0; transform: translateY(-10px); transition: all 0.3s; }}
-.toast.show {{ opacity: 1; transform: translateY(0); }}
-.toast.success {{ background: #065f46; color: #6ee7b7; border: 1px solid #059669; }}
-.toast.error {{ background: #7f1d1d; color: #fca5a5; border: 1px solid #dc2626; }}
-</style>
-</head>
-<body>
-<div class="container">
-  <header>
-    <div class="header-left">
-      <h1>Lite-NAS</h1>
-      <span class="user-info">{username}</span>
-    </div>
-    <a href="/logout" class="logout">退出登录</a>
-  </header>
-
-  <div class="storage-card">
-    <span class="storage-label">已使用空间</span>
-    <span class="storage-value">{format_size(total_size)}</span>
-  </div>
-
-  <div class="upload-zone" id="uploadZone">
-    <svg class="upload-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-    <p>拖拽文件到此处，或点击选择文件</p>
-    <input type="file" id="fileInput" multiple>
-    <button class="upload-btn" onclick="document.getElementById('fileInput').click()">选择文件</button>
-    <div class="progress-bar" id="progressBar"><div class="fill" id="progressFill"></div></div>
-  </div>
-
-  <table class="file-table">
-    <thead>
-      <tr><th>文件名</th><th>大小</th><th>修改时间</th><th style="text-align:right">操作</th></tr>
-    </thead>
-    <tbody>{file_rows}</tbody>
-  </table>
-</div>
-
-<div class="toast" id="toast"></div>
-
-<script>
-const zone = document.getElementById('uploadZone');
-const input = document.getElementById('fileInput');
-const bar = document.getElementById('progressBar');
-const fill = document.getElementById('progressFill');
-
-function showToast(msg, type) {{
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.className = 'toast ' + type + ' show';
-  setTimeout(() => t.className = 'toast', 3000);
-}}
-
-function uploadFile(file) {{
-  const fd = new FormData();
-  fd.append('file', file);
-  const xhr = new XMLHttpRequest();
-  bar.style.display = 'block';
-  fill.style.width = '0%';
-  xhr.upload.onprogress = e => {{ if (e.lengthComputable) fill.style.width = (e.loaded / e.total * 100) + '%'; }};
-  xhr.onload = () => {{
-    bar.style.display = 'none';
-    if (xhr.status === 200) {{ showToast(file.name + ' 上传成功', 'success'); setTimeout(() => location.reload(), 500); }}
-    else {{ showToast('上传失败: ' + xhr.responseText, 'error'); }}
-  }};
-  xhr.onerror = () => {{ bar.style.display = 'none'; showToast('上传出错', 'error'); }};
-  xhr.open('POST', '/upload');
-  xhr.send(fd);
-}}
-
-input.addEventListener('change', () => {{ for (const f of input.files) uploadFile(f); input.value = ''; }});
-zone.addEventListener('dragover', e => {{ e.preventDefault(); zone.classList.add('dragover'); }});
-zone.addEventListener('dragleave', () => zone.classList.remove('dragover'));
-zone.addEventListener('drop', e => {{ e.preventDefault(); zone.classList.remove('dragover'); for (const f of e.dataTransfer.files) uploadFile(f); }});
-</script>
-</body>
-</html>"""
+    html = load_template("index")
+    return html.replace("{{username}}", username).replace("{{storage}}", format_size(total_size)).replace("{{file_rows}}", file_rows)
 
 
 class NASHandler(BaseHTTPRequestHandler):
@@ -363,7 +268,8 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_header("Set-Cookie", generate_session_cookie(token))
             self.end_headers()
         else:
-            error_html = LOGIN_HTML.replace("</form>", '<p class="error">用户名或密码错误</p></form>')
+            login_html = load_template("login")
+            error_html = login_html.replace("</form>", '<p class="error">用户名或密码错误</p></form>')
             if username:
                 error_html = error_html.replace('value=""', f'value="{username}"')
             self.send_html(error_html, 401)
@@ -449,7 +355,7 @@ class NASHandler(BaseHTTPRequestHandler):
             if valid:
                 self.send_redirect("/")
                 return
-            self.send_html(LOGIN_HTML)
+            self.send_html(load_template("login"))
         elif path == "/logout":
             token = self.get_cookie("session")
             if token and token in sessions:
