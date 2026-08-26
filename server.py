@@ -6,6 +6,7 @@ import re
 import json
 import shutil
 import zipfile
+import tarfile
 import io
 import threading
 import uuid
@@ -280,37 +281,59 @@ def count_files_and_size(file_list):
     return count, total
 
 
-def zip_create_task(file_list, compression_level, compresslevel=None):
+def zip_create_task(file_list, compression_level, compresslevel=None, archive_type="zip"):
     task_id = str(uuid.uuid4())[:8]
     os.makedirs(ZIP_TASKS_DIR, exist_ok=True)
 
-    def run_zip():
+    def run_archive():
         task = zip_tasks[task_id]
         try:
-            out_path = os.path.join(ZIP_TASKS_DIR, f"{task_id}.zip")
-            kwargs = {'compression': compression_level}
-            if compresslevel is not None and compression_level == zipfile.ZIP_DEFLATED:
-                kwargs['compresslevel'] = compresslevel
-            with zipfile.ZipFile(out_path, 'w', **kwargs) as zf:
-                for item in file_list:
-                    fp = safe_path(item)
-                    if not fp or not os.path.exists(fp):
-                        continue
-                    if os.path.isfile(fp):
-                        arcname = os.path.basename(item)
-                        zf.write(fp, arcname)
-                        task["done"] += 1
-                    elif os.path.isdir(fp):
-                        base_name = os.path.basename(item)
-                        for dirpath, dirnames, filenames in os.walk(fp):
-                            for f in filenames:
-                                fpath = os.path.join(dirpath, f)
-                                if os.path.isfile(fpath):
-                                    arcname = os.path.join(base_name, os.path.relpath(fpath, fp))
-                                    zf.write(fpath, arcname)
-                                    task["done"] += 1
+            if archive_type == "tar":
+                out_path = os.path.join(ZIP_TASKS_DIR, f"{task_id}.tar")
+                with tarfile.open(out_path, 'w') as tf:
+                    for item in file_list:
+                        fp = safe_path(item)
+                        if not fp or not os.path.exists(fp):
+                            continue
+                        if os.path.isfile(fp):
+                            arcname = os.path.basename(item)
+                            tf.add(fp, arcname=arcname)
+                            task["done"] += 1
+                        elif os.path.isdir(fp):
+                            base_name = os.path.basename(item)
+                            for dirpath, dirnames, filenames in os.walk(fp):
+                                for f in filenames:
+                                    fpath = os.path.join(dirpath, f)
+                                    if os.path.isfile(fpath):
+                                        arcname = os.path.join(base_name, os.path.relpath(fpath, fp))
+                                        tf.add(fpath, arcname=arcname)
+                                        task["done"] += 1
+            else:
+                out_path = os.path.join(ZIP_TASKS_DIR, f"{task_id}.zip")
+                kwargs = {'compression': compression_level}
+                if compresslevel is not None and compression_level == zipfile.ZIP_DEFLATED:
+                    kwargs['compresslevel'] = compresslevel
+                with zipfile.ZipFile(out_path, 'w', **kwargs) as zf:
+                    for item in file_list:
+                        fp = safe_path(item)
+                        if not fp or not os.path.exists(fp):
+                            continue
+                        if os.path.isfile(fp):
+                            arcname = os.path.basename(item)
+                            zf.write(fp, arcname)
+                            task["done"] += 1
+                        elif os.path.isdir(fp):
+                            base_name = os.path.basename(item)
+                            for dirpath, dirnames, filenames in os.walk(fp):
+                                for f in filenames:
+                                    fpath = os.path.join(dirpath, f)
+                                    if os.path.isfile(fpath):
+                                        arcname = os.path.join(base_name, os.path.relpath(fpath, fp))
+                                        zf.write(fpath, arcname)
+                                        task["done"] += 1
             task["status"] = "done"
             task["out_path"] = out_path
+            task["archive_type"] = archive_type
         except Exception as e:
             task["status"] = "error"
             task["error"] = str(e)
@@ -321,10 +344,11 @@ def zip_create_task(file_list, compression_level, compresslevel=None):
         "total": total_files,
         "done": 0,
         "out_path": None,
+        "archive_type": archive_type,
         "error": None,
         "time": time.time()
     }
-    t = threading.Thread(target=run_zip, daemon=True)
+    t = threading.Thread(target=run_archive, daemon=True)
     t.start()
     return task_id
 
@@ -706,11 +730,11 @@ class NASHandler(BaseHTTPRequestHandler):
         comp_level = comp_map.get(compression, zipfile.ZIP_STORED)
 
         if compression == "best":
-            task_id = zip_create_task(file_list, zipfile.ZIP_DEFLATED, compresslevel=9)
+            task_id = zip_create_task(file_list, zipfile.ZIP_DEFLATED, compresslevel=9, archive_type="zip")
         elif compression == "fast":
-            task_id = zip_create_task(file_list, zipfile.ZIP_DEFLATED, compresslevel=6)
+            task_id = zip_create_task(file_list, zipfile.ZIP_DEFLATED, compresslevel=6, archive_type="zip")
         else:
-            task_id = zip_create_task(file_list, zipfile.ZIP_STORED)
+            task_id = zip_create_task(file_list, None, archive_type="tar")
 
         self.send_text(task_id)
 
@@ -769,9 +793,16 @@ class NASHandler(BaseHTTPRequestHandler):
 
         try:
             file_size = os.path.getsize(out_path)
+            archive_type = task.get("archive_type", "zip")
+            if archive_type == "tar":
+                content_type = "application/x-tar"
+                filename = "download.tar"
+            else:
+                content_type = "application/zip"
+                filename = "download.zip"
             self.send_response(200)
-            self.send_header("Content-Type", "application/zip")
-            self.send_header("Content-Disposition", f'attachment; filename="download.zip"')
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.send_header("Content-Length", str(file_size))
             self.end_headers()
 
@@ -785,7 +816,7 @@ class NASHandler(BaseHTTPRequestHandler):
         except (ConnectionAbortedError, BrokenPipeError):
             pass
         except Exception as e:
-            print(f"Zip download error: {e}")
+            print(f"Archive download error: {e}")
 
         try:
             os.remove(out_path)
