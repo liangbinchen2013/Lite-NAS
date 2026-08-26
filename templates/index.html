@@ -65,6 +65,20 @@ input[type="file"] { display: none; }
 .toast.show { opacity: 1; transform: translateY(0); }
 .toast.success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
 .toast.error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+.file-check { width: 14px; height: 14px; cursor: pointer; }
+.zip-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; padding: 12px 20px; background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.btn-zip-download { padding: 7px 20px; background: #3b82f6; color: white; border: none; border-radius: 4px; font-size: 13px; cursor: pointer; transition: background 0.2s; }
+.btn-zip-download:hover { background: #2563eb; }
+.btn-zip-download:disabled { background: #93c5fd; cursor: not-allowed; }
+.zip-level { padding: 6px 10px; border: 1px solid #ddd; border-radius: 4px; font-size: 13px; outline: none; }
+.zip-hint { color: #666; font-size: 13px; margin-left: 8px; }
+.zip-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 999; justify-content: center; align-items: center; }
+.zip-overlay.show { display: flex; }
+.zip-dialog { background: #fff; border-radius: 12px; padding: 32px 40px; min-width: 360px; text-align: center; box-shadow: 0 8px 32px rgba(0,0,0,0.2); }
+.zip-dialog h3 { margin-bottom: 20px; font-size: 16px; color: #333; }
+.zip-progress-bar { height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden; margin-bottom: 16px; }
+.zip-progress-fill { height: 100%; background: #3b82f6; border-radius: 3px; transition: width 0.3s; width: 0%; }
+.zip-progress-text { font-size: 13px; color: #666; }
 </style>
 </head>
 <body>
@@ -111,10 +125,21 @@ input[type="file"] { display: none; }
     </div>
   </div>
 
+  <div class="zip-toolbar" id="zipToolbar" style="display:none">
+    <button class="btn-zip-download" onclick="startZipDownload()">下载选中</button>
+    <select id="zipLevel" class="zip-level">
+      <option value="none">不压缩</option>
+      <option value="fast">快速压缩</option>
+      <option value="best">最大压缩</option>
+    </select>
+    <span class="zip-hint" id="zipHint"></span>
+  </div>
+
   <table class="file-table">
     <thead>
       <tr>
-        <th style="width:35%">名称</th>
+        <th style="width:4%"><input type="checkbox" id="checkAll" onclick="toggleAll(this)"></th>
+        <th style="width:31%">名称</th>
         <th style="width:20%">修改时间</th>
         <th style="width:20%">类型</th>
         <th style="width:10%">大小</th>
@@ -123,6 +148,16 @@ input[type="file"] { display: none; }
     </thead>
     <tbody>{{file_rows}}</tbody>
   </table>
+</div>
+
+<div class="zip-overlay" id="zipOverlay">
+  <div class="zip-dialog">
+    <h3>正在压缩...</h3>
+    <div class="zip-progress-bar">
+      <div class="zip-progress-fill" id="zipProgressFill"></div>
+    </div>
+    <div class="zip-progress-text" id="zipProgressText">0 / 0 文件</div>
+  </div>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -321,6 +356,103 @@ zone.addEventListener('drop', async e => {
   }
 });
 document.getElementById('folderName').addEventListener('keydown', e => { if (e.key === 'Enter') createFolder(); });
+
+function toggleAll(el) {
+  const checks = document.querySelectorAll('.file-check');
+  checks.forEach(c => c.checked = el.checked);
+  updateZipToolbar();
+}
+
+document.addEventListener('change', e => {
+  if (e.target.classList.contains('file-check')) updateZipToolbar();
+});
+
+function updateZipToolbar() {
+  const checks = document.querySelectorAll('.file-check');
+  const checked = document.querySelectorAll('.file-check:checked');
+  const toolbar = document.getElementById('zipToolbar');
+  const hint = document.getElementById('zipHint');
+  if (checked.length > 0) {
+    toolbar.style.display = 'flex';
+    hint.textContent = '已选 ' + checked.length + ' / ' + checks.length + ' 项';
+  } else {
+    toolbar.style.display = 'none';
+  }
+}
+
+function getSelectedFiles() {
+  const checked = document.querySelectorAll('.file-check:checked');
+  return Array.from(checked).map(c => c.value);
+}
+
+function startZipDownload() {
+  const files = getSelectedFiles();
+  if (files.length === 0) { showToast('请先选择文件', 'error'); return; }
+  const level = document.getElementById('zipLevel').value;
+
+  document.getElementById('zipOverlay').classList.add('show');
+  document.getElementById('zipProgressFill').style.width = '0%';
+  document.getElementById('zipProgressText').textContent = '准备中...';
+
+  const params = new URLSearchParams();
+  params.append('files', files.join(','));
+  params.append('compression', level);
+
+  const xhr = new XMLHttpRequest();
+  xhr.onload = () => {
+    if (xhr.status === 200) {
+      const taskId = xhr.responseText;
+      pollZipProgress(taskId);
+    } else {
+      document.getElementById('zipOverlay').classList.remove('show');
+      showToast('创建任务失败', 'error');
+    }
+  };
+  xhr.onerror = () => {
+    document.getElementById('zipOverlay').classList.remove('show');
+    showToast('请求失败', 'error');
+  };
+  xhr.open('POST', '/zip-start');
+  xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+  xhr.send(params.toString());
+}
+
+function pollZipProgress(taskId) {
+  const poll = () => {
+    fetch('/zip-progress?task_id=' + taskId)
+      .then(r => r.json())
+      .then(data => {
+        if (data.status === 'not_found') {
+          document.getElementById('zipOverlay').classList.remove('show');
+          showToast('任务不存在', 'error');
+          return;
+        }
+        if (data.status === 'compressing') {
+          const pct = data.total > 0 ? Math.round(data.done / data.total * 100) : 0;
+          document.getElementById('zipProgressFill').style.width = pct + '%';
+          document.getElementById('zipProgressText').textContent = data.done + ' / ' + data.total + ' 文件';
+          setTimeout(poll, 300);
+        } else if (data.status === 'done') {
+          document.getElementById('zipProgressFill').style.width = '100%';
+          document.getElementById('zipProgressText').textContent = '下载中...';
+          setTimeout(() => {
+            window.location.href = '/zip-download?task_id=' + taskId;
+            setTimeout(() => {
+              document.getElementById('zipOverlay').classList.remove('show');
+            }, 1000);
+          }, 200);
+        } else if (data.status === 'error') {
+          document.getElementById('zipOverlay').classList.remove('show');
+          showToast('压缩失败: ' + (data.error || '未知错误'), 'error');
+        }
+      })
+      .catch(() => {
+        document.getElementById('zipOverlay').classList.remove('show');
+        showToast('查询进度失败', 'error');
+      });
+  };
+  poll();
+}
 </script>
 </body>
 </html>

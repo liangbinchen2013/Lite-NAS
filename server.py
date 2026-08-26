@@ -5,6 +5,10 @@ import time
 import re
 import json
 import shutil
+import zipfile
+import io
+import threading
+import uuid
 from http.server import BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer
@@ -173,6 +177,9 @@ TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 
 sessions = {}
 
+zip_tasks = {}
+ZIP_TASKS_DIR = os.path.join(BASE_DIR, ".zip_tasks")
+
 
 def load_config():
     try:
@@ -253,6 +260,97 @@ def safe_path(rel_path):
     return fp
 
 
+def count_files_and_size(file_list):
+    count = 0
+    total = 0
+    for item in file_list:
+        fp = safe_path(item)
+        if not fp or not os.path.exists(fp):
+            continue
+        if os.path.isfile(fp):
+            count += 1
+            total += os.path.getsize(fp)
+        elif os.path.isdir(fp):
+            for dirpath, dirnames, filenames in os.walk(fp):
+                for f in filenames:
+                    fpath = os.path.join(dirpath, f)
+                    if os.path.isfile(fpath):
+                        count += 1
+                        total += os.path.getsize(fpath)
+    return count, total
+
+
+def zip_create_task(file_list, compression_level, compresslevel=None):
+    task_id = str(uuid.uuid4())[:8]
+    os.makedirs(ZIP_TASKS_DIR, exist_ok=True)
+
+    def run_zip():
+        task = zip_tasks[task_id]
+        try:
+            out_path = os.path.join(ZIP_TASKS_DIR, f"{task_id}.zip")
+            kwargs = {'compression': compression_level}
+            if compresslevel is not None and compression_level == zipfile.ZIP_DEFLATED:
+                kwargs['compresslevel'] = compresslevel
+            with zipfile.ZipFile(out_path, 'w', **kwargs) as zf:
+                for item in file_list:
+                    fp = safe_path(item)
+                    if not fp or not os.path.exists(fp):
+                        continue
+                    if os.path.isfile(fp):
+                        arcname = os.path.basename(item)
+                        zf.write(fp, arcname)
+                        task["done"] += 1
+                    elif os.path.isdir(fp):
+                        base_name = os.path.basename(item)
+                        for dirpath, dirnames, filenames in os.walk(fp):
+                            for f in filenames:
+                                fpath = os.path.join(dirpath, f)
+                                if os.path.isfile(fpath):
+                                    arcname = os.path.join(base_name, os.path.relpath(fpath, fp))
+                                    zf.write(fpath, arcname)
+                                    task["done"] += 1
+            task["status"] = "done"
+            task["out_path"] = out_path
+        except Exception as e:
+            task["status"] = "error"
+            task["error"] = str(e)
+
+    total_files, _ = count_files_and_size(file_list)
+    zip_tasks[task_id] = {
+        "status": "compressing",
+        "total": total_files,
+        "done": 0,
+        "out_path": None,
+        "error": None,
+        "time": time.time()
+    }
+    t = threading.Thread(target=run_zip, daemon=True)
+    t.start()
+    return task_id
+
+
+def zip_get_progress(task_id):
+    task = zip_tasks.get(task_id)
+    if not task:
+        return None
+    if time.time() - task["time"] > 600:
+        del zip_tasks[task_id]
+        return None
+    return task
+
+
+def zip_cleanup():
+    now = time.time()
+    expired = [k for k, v in zip_tasks.items() if now - v["time"] > 600]
+    for k in expired:
+        task = zip_tasks.pop(k, None)
+        if task and task.get("out_path") and os.path.exists(task["out_path"]):
+            try:
+                os.remove(task["out_path"])
+            except OSError:
+                pass
+
+
 def get_file_ext_type(name):
     ext = os.path.splitext(name)[1].lower()
     type_map = {
@@ -316,12 +414,15 @@ def get_file_list_html(username, rel_path=""):
         encoded_name = item["name"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         url_name = quote(item["name"])
         date_str = time.strftime("%Y/%m/%d %H:%M", time.localtime(item["mtime"]))
+        item_path = rel_path + "/" + item["name"] if rel_path else item["name"]
+        item_path_encoded = quote(item_path, safe="")
 
         if item["is_dir"]:
             child_path = rel_path + "/" + item["name"] if rel_path else item["name"]
             url_child = quote(child_path, safe="")
             file_rows += f"""
         <tr>
+          <td><input type="checkbox" class="file-check" value="{item_path_encoded}"></td>
           <td><a href="/folder/{url_child}" class="file-link folder-link">{encoded_name}</a></td>
           <td>{date_str}</td>
           <td>文件夹</td>
@@ -340,6 +441,7 @@ def get_file_list_html(username, rel_path=""):
             url_file = quote(file_path, safe="")
             file_rows += f"""
         <tr>
+          <td><input type="checkbox" class="file-check" value="{item_path_encoded}"></td>
           <td><a href="/download/{url_file}" class="file-link">{encoded_name}</a></td>
           <td>{date_str}</td>
           <td>{item['type']}</td>
@@ -356,7 +458,7 @@ def get_file_list_html(username, rel_path=""):
         </tr>"""
 
     if not items:
-        file_rows = '<tr><td colspan="5" class="empty">此文件夹为空</td></tr>'
+        file_rows = '<tr><td colspan="6" class="empty">此文件夹为空</td></tr>'
 
     breadcrumb_html = ""
     for i, crumb in enumerate(breadcrumb):
@@ -573,6 +675,124 @@ class NASHandler(BaseHTTPRequestHandler):
         self.send_header("Location", redir)
         self.end_headers()
 
+    def handle_zip_start(self):
+        valid, username = self.is_authenticated()
+        if not valid:
+            self.send_text("Unauthorized", 401)
+            return
+
+        zip_cleanup()
+
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode("utf-8")
+        params = parse_qs(body)
+        file_list_str = params.get("files", [""])[0]
+        compression = params.get("compression", ["none"])[0]
+
+        if not file_list_str:
+            self.send_text("No files", 400)
+            return
+
+        file_list = [unquote(f) for f in file_list_str.split(",") if f]
+        if not file_list:
+            self.send_text("No files", 400)
+            return
+
+        comp_map = {
+            "none": zipfile.ZIP_STORED,
+            "fast": zipfile.ZIP_DEFLATED,
+            "best": zipfile.ZIP_DEFLATED
+        }
+        comp_level = comp_map.get(compression, zipfile.ZIP_STORED)
+
+        if compression == "best":
+            task_id = zip_create_task(file_list, zipfile.ZIP_DEFLATED, compresslevel=9)
+        elif compression == "fast":
+            task_id = zip_create_task(file_list, zipfile.ZIP_DEFLATED, compresslevel=6)
+        else:
+            task_id = zip_create_task(file_list, zipfile.ZIP_STORED)
+
+        self.send_text(task_id)
+
+    def handle_zip_progress(self):
+        valid, username = self.is_authenticated()
+        if not valid:
+            self.send_text("Unauthorized", 401)
+            return
+
+        query = urlparse(self.path).query
+        params = parse_qs(query)
+        task_id = params.get("task_id", [""])[0]
+
+        if not task_id:
+            self.send_text("No task_id", 400)
+            return
+
+        task = zip_get_progress(task_id)
+        if not task:
+            self.send_text(json.dumps({"status": "not_found"}), 200)
+            return
+
+        result = {
+            "status": task["status"],
+            "total": task["total"],
+            "done": task["done"]
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(json.dumps(result).encode("utf-8"))
+
+    def handle_zip_download(self):
+        valid, username = self.is_authenticated()
+        if not valid:
+            self.send_redirect("/login")
+            return
+
+        query = urlparse(self.path).query
+        params = parse_qs(query)
+        task_id = params.get("task_id", [""])[0]
+
+        if not task_id:
+            self.send_text("No task_id", 400)
+            return
+
+        task = zip_get_progress(task_id)
+        if not task or task["status"] != "done":
+            self.send_text("Not ready", 400)
+            return
+
+        out_path = task["out_path"]
+        if not out_path or not os.path.exists(out_path):
+            self.send_text("File not found", 404)
+            return
+
+        try:
+            file_size = os.path.getsize(out_path)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", f'attachment; filename="download.zip"')
+            self.send_header("Content-Length", str(file_size))
+            self.end_headers()
+
+            with open(out_path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass
+        except Exception as e:
+            print(f"Zip download error: {e}")
+
+        try:
+            os.remove(out_path)
+        except OSError:
+            pass
+        zip_tasks.pop(task_id, None)
+
     def do_GET(self):
         path = urlparse(self.path).path
 
@@ -610,6 +830,10 @@ class NASHandler(BaseHTTPRequestHandler):
         elif path.startswith("/download/"):
             filename = unquote(path[len("/download/"):])
             self.handle_download(filename)
+        elif path == "/zip-progress":
+            self.handle_zip_progress()
+        elif path == "/zip-download":
+            self.handle_zip_download()
         else:
             self.send_text("Not found", 404)
 
@@ -624,6 +848,8 @@ class NASHandler(BaseHTTPRequestHandler):
             self.handle_delete()
         elif path == "/mkdir":
             self.handle_mkdir()
+        elif path == "/zip-start":
+            self.handle_zip_start()
         else:
             self.send_text("Not found", 404)
 
