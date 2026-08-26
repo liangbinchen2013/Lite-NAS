@@ -5,7 +5,7 @@ import time
 import re
 import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse, unquote
+from urllib.parse import parse_qs, urlparse, unquote, quote
 import mimetypes
 
 
@@ -198,16 +198,17 @@ def get_file_list_html(username):
     file_rows = ""
     for name, size, date, type_name in files:
         encoded_name = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        url_name = quote(name)
         file_rows += f"""
         <tr>
-          <td><a href="/download/{unquote(name)}" class="file-link">{encoded_name}</a></td>
+          <td><a href="/download/{url_name}" class="file-link">{encoded_name}</a></td>
           <td>{date}</td>
           <td>{type_name}</td>
           <td>{size}</td>
           <td class="action-cell">
-            <a href="/download/{unquote(name)}" class="btn btn-download" title="下载">下载</a>
+            <a href="/download/{url_name}" class="btn btn-download" title="下载">下载</a>
             <form method="POST" action="/delete" style="display:inline" onsubmit="return confirm('确定删除 {encoded_name} 吗？')">
-              <input type="hidden" name="filename" value="{unquote(name)}">
+              <input type="hidden" name="filename" value="{url_name}">
               <button type="submit" class="btn btn-delete" title="删除">删除</button>
             </form>
           </td>
@@ -329,22 +330,29 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_text("File not found", 404)
             return
 
-        mime, _ = mimetypes.guess_type(filename)
-        if mime is None:
-            mime = "application/octet-stream"
+        try:
+            mime, _ = mimetypes.guess_type(filename)
+            if mime is None:
+                mime = "application/octet-stream"
 
-        self.send_response(200)
-        self.send_header("Content-Type", mime)
-        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
-        self.send_header("Content-Length", str(os.path.getsize(filepath)))
-        self.end_headers()
+            encoded_filename = quote(filename)
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{encoded_filename}")
+            self.send_header("Content-Length", str(os.path.getsize(filepath)))
+            self.end_headers()
 
-        with open(filepath, "rb") as f:
-            while True:
-                chunk = f.read(8192)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
+            with open(filepath, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass
+        except Exception as e:
+            print(f"Download error: {e}")
 
     def handle_delete(self, filename):
         valid, username = self.is_authenticated()
