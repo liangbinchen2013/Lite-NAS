@@ -43,7 +43,8 @@ input[type="file"] { display: none; }
 .progress-fill { height: 100%; background: #3b82f6; border-radius: 2px; transition: width 0.1s; width: 0%; }
 .progress-track.scrolling .progress-fill { width: 30% !important; animation: scroll-progress 1s linear infinite; }
 @keyframes scroll-progress { 0% { transform: translateX(-100%); } 100% { transform: translateX(400%); } }
-.progress-info { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 12px; color: #666; }
+.progress-info { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; font-size: 12px; color: #666; gap: 12px; }
+.progress-speed { color: #10b981; font-weight: 500; }
 .progress-percent { font-weight: 600; color: #3b82f6; }
 .toast { position: fixed; top: 20px; right: 20px; padding: 10px 16px; border-radius: 6px; font-size: 13px; z-index: 1000; opacity: 0; transform: translateY(-10px); transition: all 0.3s; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
 .toast.show { opacity: 1; transform: translateY(0); }
@@ -76,6 +77,7 @@ input[type="file"] { display: none; }
       </div>
       <div class="progress-info">
         <span id="progressSize">0 KB / 0 KB</span>
+        <span id="progressSpeed"></span>
         <span id="progressCount">0 / 0 文件</span>
         <span class="progress-percent" id="progressPercent">0%</span>
       </div>
@@ -107,12 +109,19 @@ const fill = document.getElementById('progressFill');
 const sizeEl = document.getElementById('progressSize');
 const countEl = document.getElementById('progressCount');
 const percentEl = document.getElementById('progressPercent');
+const speedEl = document.getElementById('progressSpeed');
 
 function formatBytes(bytes) {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
   if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
   return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+}
+
+function formatSpeed(bytesPerSec) {
+  if (bytesPerSec < 1024) return bytesPerSec.toFixed(0) + ' B/s';
+  if (bytesPerSec < 1024 * 1024) return (bytesPerSec / 1024).toFixed(1) + ' KB/s';
+  return (bytesPerSec / (1024 * 1024)).toFixed(1) + ' MB/s';
 }
 
 function showToast(msg, type) {
@@ -142,9 +151,30 @@ function uploadFiles(files) {
   sizeEl.textContent = '0 / ' + formatBytes(totalBytes);
   countEl.textContent = '0 / ' + totalFiles + ' 文件';
   percentEl.textContent = '0%';
+  speedEl.textContent = '';
   setScrolling(true);
   
   let index = 0;
+  let startTime = Date.now();
+  let lastLoaded = 0;
+  let lastTime = startTime;
+  
+  function updateProgress(currentLoaded) {
+    const now = Date.now();
+    const elapsed = (now - lastTime) / 1000;
+    if (elapsed >= 0.1) {
+      const bytesPerSec = (currentLoaded - lastLoaded) / elapsed;
+      speedEl.textContent = formatSpeed(bytesPerSec);
+      lastLoaded = currentLoaded;
+      lastTime = now;
+    }
+    
+    const percent = Math.round((currentLoaded / totalBytes) * 100);
+    fill.style.width = percent + '%';
+    sizeEl.textContent = formatBytes(currentLoaded) + ' / ' + formatBytes(totalBytes);
+    countEl.textContent = uploadedFiles + ' / ' + totalFiles + ' 文件';
+    percentEl.textContent = percent + '%';
+  }
   
   function uploadNext() {
     if (index >= files.length) {
@@ -153,6 +183,7 @@ function uploadFiles(files) {
       sizeEl.textContent = formatBytes(totalBytes) + ' / ' + formatBytes(totalBytes);
       countEl.textContent = totalFiles + ' / ' + totalFiles + ' 文件';
       percentEl.textContent = '100%';
+      speedEl.textContent = '';
       showToast('全部上传完成', 'success');
       setTimeout(() => location.reload(), 300);
       return;
@@ -167,12 +198,7 @@ function uploadFiles(files) {
     
     xhr.upload.onprogress = e => {
       if (e.lengthComputable) {
-        const currentLoaded = fileStart + e.loaded;
-        const percent = Math.round((currentLoaded / totalBytes) * 100);
-        fill.style.width = percent + '%';
-        sizeEl.textContent = formatBytes(currentLoaded) + ' / ' + formatBytes(totalBytes);
-        countEl.textContent = uploadedFiles + ' / ' + totalFiles + ' 文件';
-        percentEl.textContent = percent + '%';
+        updateProgress(fileStart + e.loaded);
       }
     };
     
