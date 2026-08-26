@@ -3,6 +3,7 @@ import hashlib
 import secrets
 import time
 import re
+import json
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import parse_qs, urlparse, unquote
 import mimetypes
@@ -41,37 +42,74 @@ def parse_multipart(content_type, body):
 
     return filename, file_data
 
+
 HOST = "127.0.0.1"
 PORT = 8888
-STORAGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "storage")
-PASSWORD = "admin"
-SECRET_KEY = secrets.token_hex(32)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STORAGE_DIR = os.path.join(BASE_DIR, "storage")
+CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 
 sessions = {}
 
 
-def get_password_hash(password):
-    return hashlib.sha256(password.encode()).hexdigest()
+def load_config():
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {"username": "", "password": ""}
 
 
-def create_session_token():
+def md5_hash(password):
+    return hashlib.md5(password.encode()).hexdigest()
+
+
+def verify_user(username, password):
+    config = load_config()
+    return (username == config["username"] and 
+            md5_hash(password) == config["password"])
+
+
+def create_session_token(username):
     token = secrets.token_hex(32)
-    sessions[token] = time.time()
+    sessions[token] = {"username": username, "time": time.time()}
     return token
 
 
 def is_valid_session(token):
     if token and token in sessions:
-        if time.time() - sessions[token] < 86400:
-            sessions[token] = time.time()
-            return True
+        if time.time() - sessions[token]["time"] < 86400:
+            sessions[token]["time"] = time.time()
+            return True, sessions[token]["username"]
         else:
             del sessions[token]
-    return False
+    return False, None
 
 
 def generate_session_cookie(token):
     return f"session={token}; Path=/; HttpOnly; SameSite=Strict"
+
+
+def get_dir_size(path):
+    total = 0
+    if os.path.exists(path):
+        for dirpath, dirnames, filenames in os.walk(path):
+            for f in filenames:
+                fp = os.path.join(dirpath, f)
+                if os.path.isfile(fp):
+                    total += os.path.getsize(fp)
+    return total
+
+
+def format_size(size):
+    if size < 1024:
+        return f"{size} B"
+    elif size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    elif size < 1024 * 1024 * 1024:
+        return f"{size / (1024*1024):.1f} MB"
+    else:
+        return f"{size / (1024*1024*1024):.1f} GB"
 
 
 LOGIN_HTML = """<!DOCTYPE html>
@@ -88,21 +126,25 @@ h1 { font-size: 24px; margin-bottom: 8px; color: #f8fafc; }
 .subtitle { color: #94a3b8; margin-bottom: 32px; font-size: 14px; }
 .form-group { margin-bottom: 20px; }
 label { display: block; margin-bottom: 6px; font-size: 14px; color: #cbd5e1; }
-input[type="password"] { width: 100%; padding: 12px 16px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #f8fafc; font-size: 16px; outline: none; transition: border-color 0.2s; }
-input[type="password"]:focus { border-color: #3b82f6; }
+input[type="text"], input[type="password"] { width: 100%; padding: 12px 16px; background: #0f172a; border: 1px solid #334155; border-radius: 8px; color: #f8fafc; font-size: 16px; outline: none; transition: border-color 0.2s; }
+input[type="text"]:focus, input[type="password"]:focus { border-color: #3b82f6; }
 button { width: 100%; padding: 12px; background: #3b82f6; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer; transition: background 0.2s; }
 button:hover { background: #2563eb; }
-.error { color: #f87171; margin-bottom: 16px; font-size: 14px; }
+.error { color: #f87171; margin-bottom: 16px; font-size: 14px; text-align: center; }
 </style>
 </head>
 <body>
 <div class="login-box">
   <h1>Lite-NAS</h1>
-  <p class="subtitle">请输入密码以访问文件管理</p>
+  <p class="subtitle">请输入用户名和密码以访问文件管理</p>
   <form method="POST" action="/login">
     <div class="form-group">
+      <label for="username">用户名</label>
+      <input type="text" id="username" name="username" placeholder="请输入用户名" autofocus>
+    </div>
+    <div class="form-group">
       <label for="password">密码</label>
-      <input type="password" id="password" name="password" placeholder="请输入访问密码" autofocus>
+      <input type="password" id="password" name="password" placeholder="请输入密码">
     </div>
     <button type="submit">登录</button>
   </form>
@@ -111,23 +153,18 @@ button:hover { background: #2563eb; }
 </html>"""
 
 
-def get_file_list_html():
+def get_file_list_html(username):
     files = []
     if os.path.exists(STORAGE_DIR):
         for f in sorted(os.listdir(STORAGE_DIR)):
             fp = os.path.join(STORAGE_DIR, f)
             if os.path.isfile(fp):
                 size = os.path.getsize(fp)
-                if size < 1024:
-                    size_str = f"{size} B"
-                elif size < 1024 * 1024:
-                    size_str = f"{size / 1024:.1f} KB"
-                elif size < 1024 * 1024 * 1024:
-                    size_str = f"{size / (1024*1024):.1f} MB"
-                else:
-                    size_str = f"{size / (1024*1024*1024):.1f} GB"
                 mtime = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(os.path.getmtime(fp)))
-                files.append((f, size_str, mtime))
+                files.append((f, format_size(size), mtime))
+
+    total_size = get_dir_size(STORAGE_DIR)
+    file_count = len(files)
 
     file_rows = ""
     for name, size, mtime in files:
@@ -167,9 +204,14 @@ def get_file_list_html():
 body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #e2e8f0; min-height: 100vh; }}
 .container {{ max-width: 960px; margin: 0 auto; padding: 32px 24px; }}
 header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; }}
+.header-left {{ display: flex; align-items: center; gap: 16px; }}
 header h1 {{ font-size: 28px; color: #f8fafc; }}
+.user-info {{ color: #94a3b8; font-size: 14px; padding: 6px 12px; background: #0f172a; border-radius: 6px; }}
 .logout {{ color: #94a3b8; text-decoration: none; font-size: 14px; padding: 8px 16px; border: 1px solid #334155; border-radius: 8px; transition: all 0.2s; }}
 .logout:hover {{ color: #f8fafc; border-color: #64748b; }}
+.storage-card {{ background: #1e293b; border-radius: 12px; padding: 20px 24px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; }}
+.storage-label {{ color: #94a3b8; font-size: 14px; }}
+.storage-value {{ color: #f8fafc; font-size: 24px; font-weight: 600; }}
 .upload-zone {{ background: #1e293b; border: 2px dashed #334155; border-radius: 12px; padding: 40px; text-align: center; margin-bottom: 24px; transition: all 0.2s; cursor: pointer; }}
 .upload-zone:hover, .upload-zone.dragover {{ border-color: #3b82f6; background: #1e293b; }}
 .upload-zone p {{ color: #94a3b8; margin-top: 12px; font-size: 14px; }}
@@ -199,17 +241,22 @@ input[type="file"] {{ display: none; }}
 .toast.show {{ opacity: 1; transform: translateY(0); }}
 .toast.success {{ background: #065f46; color: #6ee7b7; border: 1px solid #059669; }}
 .toast.error {{ background: #7f1d1d; color: #fca5a5; border: 1px solid #dc2626; }}
-.storage-info {{ color: #64748b; font-size: 13px; margin-bottom: 24px; }}
 </style>
 </head>
 <body>
 <div class="container">
   <header>
-    <h1>Lite-NAS</h1>
+    <div class="header-left">
+      <h1>Lite-NAS</h1>
+      <span class="user-info">{username}</span>
+    </div>
     <a href="/logout" class="logout">退出登录</a>
   </header>
 
-  <div class="storage-info">已存储 {len(files)} 个文件</div>
+  <div class="storage-card">
+    <span class="storage-label">已使用空间</span>
+    <span class="storage-value">{format_size(total_size)}</span>
+  </div>
 
   <div class="upload-zone" id="uploadZone">
     <svg class="upload-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -299,25 +346,31 @@ class NASHandler(BaseHTTPRequestHandler):
 
     def is_authenticated(self):
         token = self.get_cookie("session")
-        return is_valid_session(token)
+        valid, username = is_valid_session(token)
+        return valid, username
 
     def handle_login(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8")
         params = parse_qs(body)
+        username = params.get("username", [""])[0]
         password = params.get("password", [""])[0]
 
-        if password == PASSWORD:
-            token = create_session_token()
+        if verify_user(username, password):
+            token = create_session_token(username)
             self.send_response(302)
             self.send_header("Location", "/")
             self.send_header("Set-Cookie", generate_session_cookie(token))
             self.end_headers()
         else:
-            self.send_html(LOGIN_HTML.replace("</form>", '<p class="error" style="margin-top:12px;text-align:center">密码错误</p></form>'), 401)
+            error_html = LOGIN_HTML.replace("</form>", '<p class="error">用户名或密码错误</p></form>')
+            if username:
+                error_html = error_html.replace('value=""', f'value="{username}"')
+            self.send_html(error_html, 401)
 
     def handle_upload(self):
-        if not self.is_authenticated():
+        valid, username = self.is_authenticated()
+        if not valid:
             self.send_redirect("/login")
             return
 
@@ -341,7 +394,8 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_text("No file", 400)
 
     def handle_download(self, filename):
-        if not self.is_authenticated():
+        valid, username = self.is_authenticated()
+        if not valid:
             self.send_redirect("/login")
             return
 
@@ -368,7 +422,8 @@ class NASHandler(BaseHTTPRequestHandler):
                 self.wfile.write(chunk)
 
     def handle_delete(self, filename):
-        if not self.is_authenticated():
+        valid, username = self.is_authenticated()
+        if not valid:
             self.send_redirect("/login")
             return
 
@@ -384,12 +439,14 @@ class NASHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
 
         if path == "/":
-            if not self.is_authenticated():
+            valid, username = self.is_authenticated()
+            if not valid:
                 self.send_redirect("/login")
                 return
-            self.send_html(get_file_list_html())
+            self.send_html(get_file_list_html(username))
         elif path == "/login":
-            if self.is_authenticated():
+            valid, username = self.is_authenticated()
+            if valid:
                 self.send_redirect("/")
                 return
             self.send_html(LOGIN_HTML)
@@ -426,9 +483,9 @@ class NASHandler(BaseHTTPRequestHandler):
 
 def main():
     os.makedirs(STORAGE_DIR, exist_ok=True)
+
     server = HTTPServer((HOST, PORT), NASHandler)
     print(f"Lite-NAS server running at http://{HOST}:{PORT}")
-    print(f"Password: {PASSWORD}")
     print("Press Ctrl+C to stop.")
     try:
         server.serve_forever()
