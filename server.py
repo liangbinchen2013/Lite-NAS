@@ -263,18 +263,22 @@ def get_file_list_html(username, rel_path=""):
     if not current_dir or not os.path.isdir(current_dir):
         return None
 
-    items = []
+    dirs = []
+    files = []
     if os.path.exists(current_dir):
-        for f in sorted(os.listdir(current_dir)):
+        for f in os.listdir(current_dir):
             fp = os.path.join(current_dir, f)
             if os.path.isdir(fp):
-                items.append({"name": f, "is_dir": True, "size": get_dir_size(fp),
-                              "mtime": os.path.getmtime(fp), "type": "文件夹"})
+                dirs.append({"name": f, "is_dir": True, "size": get_dir_size(fp),
+                             "mtime": os.path.getmtime(fp), "type": "文件夹"})
             else:
                 size = os.path.getsize(fp)
                 type_name = get_file_ext_type(f)
-                items.append({"name": f, "is_dir": False, "size": size,
+                files.append({"name": f, "is_dir": False, "size": size,
                               "mtime": os.path.getmtime(fp), "type": type_name})
+    dirs.sort(key=lambda x: x["name"].lower())
+    files.sort(key=lambda x: x["name"].lower())
+    items = dirs + files
 
     total_size = get_dir_size(STORAGE_DIR)
     breadcrumb = build_breadcrumb(rel_path)
