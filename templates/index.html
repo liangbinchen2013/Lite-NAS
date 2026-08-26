@@ -108,8 +108,6 @@ const sizeEl = document.getElementById('progressSize');
 const countEl = document.getElementById('progressCount');
 const percentEl = document.getElementById('progressPercent');
 
-let refreshTimer = null;
-
 function formatBytes(bytes) {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
@@ -122,18 +120,6 @@ function showToast(msg, type) {
   t.textContent = msg;
   t.className = 'toast ' + type + ' show';
   setTimeout(() => t.className = 'toast', 3000);
-}
-
-function startAutoRefresh() {
-  if (refreshTimer) return;
-  refreshTimer = setInterval(() => location.reload(), 200);
-}
-
-function stopAutoRefresh() {
-  if (refreshTimer) {
-    clearInterval(refreshTimer);
-    refreshTimer = null;
-  }
 }
 
 function setScrolling(on) {
@@ -157,14 +143,12 @@ function uploadFiles(files) {
   countEl.textContent = '0 / ' + totalFiles + ' 文件';
   percentEl.textContent = '0%';
   setScrolling(true);
-  startAutoRefresh();
   
   let index = 0;
   
   function uploadNext() {
     if (index >= files.length) {
       setScrolling(false);
-      stopAutoRefresh();
       fill.style.width = '100%';
       sizeEl.textContent = formatBytes(totalBytes) + ' / ' + formatBytes(totalBytes);
       countEl.textContent = totalFiles + ' / ' + totalFiles + ' 文件';

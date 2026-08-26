@@ -224,22 +224,41 @@ class NASHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def handle(self):
+        try:
+            super().handle()
+        except ConnectionAbortedError:
+            pass
+        except BrokenPipeError:
+            pass
+        except Exception:
+            pass
+
     def send_html(self, html, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(html.encode("utf-8"))
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(html.encode("utf-8"))
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass
 
     def send_redirect(self, location):
-        self.send_response(302)
-        self.send_header("Location", location)
-        self.end_headers()
+        try:
+            self.send_response(302)
+            self.send_header("Location", location)
+            self.end_headers()
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass
 
     def send_text(self, text, status=200):
-        self.send_response(status)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(text.encode("utf-8"))
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(text.encode("utf-8"))
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass
 
     def get_cookie(self, name):
         cookie_header = self.headers.get("Cookie", "")
