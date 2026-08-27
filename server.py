@@ -658,7 +658,7 @@ class NASHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8")
         params = parse_qs(body)
-        name = params.get("filename", [""])[0]
+        name = unquote(params.get("filename", [""])[0])
         is_dir = params.get("is_dir", ["0"])[0] == "1"
         current_path = unquote(params.get("current_path", [""])[0])
 
@@ -690,7 +690,7 @@ class NASHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8")
         params = parse_qs(body)
-        folder_name = params.get("folder_name", [""])[0].strip()
+        folder_name = unquote(params.get("folder_name", [""])[0]).strip()
         current_path = unquote(params.get("current_path", [""])[0])
 
         if folder_name and not "/" in folder_name and not "\\" in folder_name:
@@ -865,7 +865,7 @@ class NASHandler(BaseHTTPRequestHandler):
 
         sources = [unquote(s) for s in source_str.split("\n") if s.strip()]
 
-        target_abs = safe_path(target_dir)
+        target_abs = safe_path(unquote(target_dir))
         if not target_abs or not os.path.isdir(target_abs):
             self.send_text("Invalid target", 400)
             return
