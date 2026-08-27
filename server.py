@@ -445,13 +445,15 @@ def get_file_list_html(username, rel_path=""):
             child_path = rel_path + "/" + item["name"] if rel_path else item["name"]
             url_child = quote(child_path, safe="")
             file_rows += f"""
-        <tr>
+        <tr data-path="{item_path_encoded}" data-is-dir="1"
+            ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDrop(event)">
           <td><input type="checkbox" class="file-check" value="{item_path_encoded}"></td>
           <td><a href="/folder/{url_child}" class="file-link folder-link">{encoded_name}</a></td>
           <td>{date_str}</td>
           <td>文件夹</td>
           <td>-</td>
           <td class="action-cell">
+            <button class="btn btn-move" onclick="showMoveForItem('{item_path_encoded}')">移动</button>
             <form method="POST" action="/delete" style="display:inline" onsubmit="return confirm('确定删除文件夹 {encoded_name} 及其所有内容吗？')">
               <input type="hidden" name="filename" value="{quote(item['name'])}">
               <input type="hidden" name="is_dir" value="1">
@@ -464,13 +466,15 @@ def get_file_list_html(username, rel_path=""):
             file_path = rel_path + "/" + item["name"] if rel_path else item["name"]
             url_file = quote(file_path, safe="")
             file_rows += f"""
-        <tr>
+        <tr draggable="true" data-path="{item_path_encoded}"
+            ondragstart="onDragStart(event)" ondragend="onDragEnd(event)">
           <td><input type="checkbox" class="file-check" value="{item_path_encoded}"></td>
           <td><a href="/download/{url_file}" class="file-link">{encoded_name}</a></td>
           <td>{date_str}</td>
           <td>{item['type']}</td>
           <td>{format_size(item['size'])}</td>
           <td class="action-cell">
+            <button class="btn btn-move" onclick="showMoveForItem('{item_path_encoded}')">移动</button>
             <a href="/download/{url_file}" class="btn btn-download" title="下载">下载</a>
             <form method="POST" action="/delete" style="display:inline" onsubmit="return confirm('确定删除 {encoded_name} 吗？')">
               <input type="hidden" name="filename" value="{quote(item['name'])}">
@@ -824,6 +828,81 @@ class NASHandler(BaseHTTPRequestHandler):
             pass
         zip_tasks.pop(task_id, None)
 
+    def handle_api_folders(self):
+        valid, username = self.is_authenticated()
+        if not valid:
+            self.send_text("Unauthorized", 401)
+            return
+
+        folders = [""]
+        for dirpath, dirnames, filenames in os.walk(STORAGE_DIR):
+            dirnames.sort()
+            rel = os.path.relpath(dirpath, STORAGE_DIR)
+            if rel == ".":
+                continue
+            folders.append(rel.replace("\\", "/"))
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(json.dumps(folders).encode("utf-8"))
+
+    def handle_move(self):
+        valid, username = self.is_authenticated()
+        if not valid:
+            self.send_text("Unauthorized", 401)
+            return
+
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode("utf-8")
+        params = parse_qs(body)
+        source_str = params.get("source", [""])[0]
+        target_dir = params.get("target_dir", [""])[0]
+
+        if not source_str or not target_dir:
+            self.send_text("Missing parameters", 400)
+            return
+
+        sources = [unquote(s) for s in source_str.split("\n") if s.strip()]
+
+        target_abs = safe_path(target_dir)
+        if not target_abs or not os.path.isdir(target_abs):
+            self.send_text("Invalid target", 400)
+            return
+
+        moved = 0
+        for source in sources:
+            source_abs = safe_path(source)
+            if not source_abs or not os.path.exists(source_abs):
+                continue
+
+            real_source = os.path.realpath(source_abs)
+            real_target = os.path.realpath(target_abs)
+            if real_target.startswith(real_source + os.sep) or real_target == real_source:
+                continue
+
+            dest = os.path.join(target_abs, os.path.basename(source_abs))
+
+            if os.path.exists(dest):
+                base = os.path.basename(source_abs)
+                name, ext = os.path.splitext(base)
+                counter = 1
+                while os.path.exists(dest):
+                    new_name = f"{name} ({counter}){ext}" if ext else f"{name} ({counter})"
+                    dest = os.path.join(target_abs, new_name)
+                    counter += 1
+
+            try:
+                shutil.move(source_abs, dest)
+                moved += 1
+            except Exception:
+                continue
+
+        if moved > 0:
+            self.send_text("OK")
+        else:
+            self.send_text("No files moved", 400)
+
     def do_GET(self):
         path = urlparse(self.path).path
 
@@ -865,6 +944,8 @@ class NASHandler(BaseHTTPRequestHandler):
             self.handle_zip_progress()
         elif path == "/zip-download":
             self.handle_zip_download()
+        elif path == "/api/folders":
+            self.handle_api_folders()
         else:
             self.send_text("Not found", 404)
 
@@ -881,6 +962,8 @@ class NASHandler(BaseHTTPRequestHandler):
             self.handle_mkdir()
         elif path == "/zip-start":
             self.handle_zip_start()
+        elif path == "/move":
+            self.handle_move()
         else:
             self.send_text("Not found", 404)
 

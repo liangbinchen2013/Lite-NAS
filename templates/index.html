@@ -79,6 +79,29 @@ input[type="file"] { display: none; }
 .zip-progress-bar { height: 6px; background: #e0e0e0; border-radius: 3px; overflow: hidden; margin-bottom: 16px; }
 .zip-progress-fill { height: 100%; background: #3b82f6; border-radius: 3px; transition: width 0.3s; width: 0%; }
 .zip-progress-text { font-size: 13px; color: #666; }
+.btn-move { color: #f59e0b; }
+.btn-move:hover { background: #fffbeb; }
+.move-toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; padding: 12px 20px; background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+.btn-move-batch { padding: 7px 20px; background: #f59e0b; color: white; border: none; border-radius: 4px; font-size: 13px; cursor: pointer; transition: background 0.2s; }
+.btn-move-batch:hover { background: #d97706; }
+.move-hint { color: #666; font-size: 13px; margin-left: 8px; }
+.move-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 999; justify-content: center; align-items: center; }
+.move-overlay.show { display: flex; }
+.move-dialog { background: #fff; border-radius: 12px; padding: 24px 32px; min-width: 400px; max-width: 500px; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 8px 32px rgba(0,0,0,0.2); }
+.move-dialog h3 { margin: 0 0 16px 0; font-size: 16px; color: #333; }
+.folder-tree { flex: 1; overflow-y: auto; border: 1px solid #e0e0e0; border-radius: 6px; margin-bottom: 16px; max-height: 400px; }
+.folder-item { padding: 10px 16px; cursor: pointer; font-size: 13px; color: #444; border-bottom: 1px solid #f0f0f0; display: flex; align-items: center; gap: 8px; }
+.folder-item:last-child { border-bottom: none; }
+.folder-item:hover { background: #f5f8ff; }
+.folder-item.selected { background: #eff6ff; color: #3b82f6; font-weight: 500; }
+.folder-item::before { content: "📁 "; }
+.folder-item.root::before { content: "🏠 "; }
+.move-dialog-footer { display: flex; justify-content: flex-end; gap: 10px; }
+.move-dialog-footer button { padding: 8px 20px; border-radius: 4px; font-size: 13px; cursor: pointer; border: 1px solid #ddd; background: #fff; }
+.move-dialog-footer button:last-child { background: #3b82f6; color: white; border: none; }
+.move-dialog-footer button:last-child:hover { background: #2563eb; }
+.file-table tr.dragging { opacity: 0.4; }
+.file-table tr.drag-over td { border-top: 2px solid #3b82f6; }
 </style>
 </head>
 <body>
@@ -135,6 +158,11 @@ input[type="file"] { display: none; }
     <span class="zip-hint" id="zipHint"></span>
   </div>
 
+  <div class="move-toolbar" id="moveToolbar" style="display:none">
+    <button class="btn-move-batch" onclick="showMoveDialogForSelected()">移动选中</button>
+    <span class="move-hint" id="moveHint"></span>
+  </div>
+
   <table class="file-table">
     <thead>
       <tr>
@@ -157,6 +185,17 @@ input[type="file"] { display: none; }
       <div class="zip-progress-fill" id="zipProgressFill"></div>
     </div>
     <div class="zip-progress-text" id="zipProgressText">0 / 0 文件</div>
+  </div>
+</div>
+
+<div class="move-overlay" id="moveOverlay">
+  <div class="move-dialog">
+    <h3>选择目标文件夹</h3>
+    <div class="folder-tree" id="folderTree"></div>
+    <div class="move-dialog-footer">
+      <button onclick="closeMoveDialog()">取消</button>
+      <button onclick="confirmMove()">移动到这里</button>
+    </div>
   </div>
 </div>
 
@@ -370,13 +409,18 @@ document.addEventListener('change', e => {
 function updateZipToolbar() {
   const checks = document.querySelectorAll('.file-check');
   const checked = document.querySelectorAll('.file-check:checked');
-  const toolbar = document.getElementById('zipToolbar');
-  const hint = document.getElementById('zipHint');
+  const zipToolbar = document.getElementById('zipToolbar');
+  const moveToolbar = document.getElementById('moveToolbar');
+  const zipHint = document.getElementById('zipHint');
+  const moveHint = document.getElementById('moveHint');
   if (checked.length > 0) {
-    toolbar.style.display = 'flex';
-    hint.textContent = '已选 ' + checked.length + ' / ' + checks.length + ' 项';
+    zipToolbar.style.display = 'flex';
+    moveToolbar.style.display = 'flex';
+    zipHint.textContent = '已选 ' + checked.length + ' / ' + checks.length + ' 项';
+    moveHint.textContent = '已选 ' + checked.length + ' 项';
   } else {
-    toolbar.style.display = 'none';
+    zipToolbar.style.display = 'none';
+    moveToolbar.style.display = 'none';
   }
 }
 
@@ -452,6 +496,130 @@ function pollZipProgress(taskId) {
       });
   };
   poll();
+}
+
+let moveSources = [];
+let moveTarget = '';
+
+function showMoveDialog(sources) {
+  moveSources = sources;
+  moveTarget = '';
+  document.getElementById('moveOverlay').classList.add('show');
+  loadFolderTree();
+}
+
+function closeMoveDialog() {
+  document.getElementById('moveOverlay').classList.remove('show');
+}
+
+function loadFolderTree() {
+  fetch('/api/folders')
+    .then(r => r.json())
+    .then(folders => {
+      const tree = document.getElementById('folderTree');
+      tree.innerHTML = '';
+      folders.forEach(f => {
+        const div = document.createElement('div');
+        div.className = 'folder-item' + (f === '' ? ' root' : '');
+        div.textContent = f || '根目录';
+        div.dataset.path = f;
+        if (f === currentPath) {
+          div.classList.add('selected');
+          moveTarget = f;
+        }
+        div.onclick = () => {
+          document.querySelectorAll('.folder-item').forEach(el => el.classList.remove('selected'));
+          div.classList.add('selected');
+          moveTarget = f;
+        };
+        tree.appendChild(div);
+      });
+    });
+}
+
+function confirmMove() {
+  if (moveTarget === '' && !document.querySelector('.folder-item.selected')) {
+    showToast('请选择目标文件夹', 'error');
+    return;
+  }
+  const params = new URLSearchParams();
+  params.append('source', moveSources.join('\n'));
+  params.append('target_dir', moveTarget);
+
+  const xhr = new XMLHttpRequest();
+  xhr.onload = () => {
+    closeMoveDialog();
+    if (xhr.status === 200 && xhr.responseText === 'OK') {
+      showToast('移动成功', 'success');
+      setTimeout(() => location.reload(), 300);
+    } else {
+      showToast('移动失败: ' + xhr.responseText, 'error');
+    }
+  };
+  xhr.onerror = () => {
+    closeMoveDialog();
+    showToast('请求失败', 'error');
+  };
+  xhr.open('POST', '/move');
+  xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+  xhr.send(params.toString());
+}
+
+function showMoveForItem(sourcePath) {
+  showMoveDialog([sourcePath]);
+}
+
+function showMoveDialogForSelected() {
+  const checked = document.querySelectorAll('.file-check:checked');
+  const sources = Array.from(checked).map(c => c.value);
+  if (sources.length === 0) { showToast('请先选择文件', 'error'); return; }
+  showMoveDialog(sources);
+}
+
+let dragSourcePath = '';
+
+function onDragStart(e) {
+  dragSourcePath = e.currentTarget.dataset.path;
+  e.currentTarget.classList.add('dragging');
+  e.dataTransfer.effectAllowed = 'move';
+}
+
+function onDragEnd(e) {
+  e.currentTarget.classList.remove('dragging');
+}
+
+function onDragOver(e) {
+  e.preventDefault();
+  e.currentTarget.classList.add('drag-over');
+}
+
+function onDragLeave(e) {
+  e.currentTarget.classList.remove('drag-over');
+}
+
+function onDrop(e) {
+  e.preventDefault();
+  e.currentTarget.classList.remove('drag-over');
+  const targetPath = e.currentTarget.dataset.path;
+  if (!dragSourcePath || !targetPath) return;
+  if (dragSourcePath === targetPath) return;
+
+  const params = new URLSearchParams();
+  params.append('source', dragSourcePath);
+  params.append('target_dir', targetPath);
+
+  const xhr = new XMLHttpRequest();
+  xhr.onload = () => {
+    if (xhr.status === 200 && xhr.responseText === 'OK') {
+      showToast('移动成功', 'success');
+      setTimeout(() => location.reload(), 300);
+    } else {
+      showToast('移动失败', 'error');
+    }
+  };
+  xhr.open('POST', '/move');
+  xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded');
+  xhr.send(params.toString());
 }
 </script>
 </body>
