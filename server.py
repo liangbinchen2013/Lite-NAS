@@ -178,6 +178,8 @@ TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 
 sessions = {}
 
+login_failures = {}
+
 zip_tasks = {}
 ZIP_TASKS_DIR = os.path.join(BASE_DIR, ".zip_tasks")
 
@@ -557,7 +559,43 @@ class NASHandler(BaseHTTPRequestHandler):
         token = self.get_cookie("session")
         return is_valid_session(token)
 
+    def get_client_ip(self):
+        cf_ip = self.headers.get("CF-Connecting-IP", "").strip()
+        if cf_ip:
+            ip = cf_ip.split(",")[0].strip()
+            if ip:
+                return ip
+        return self.client_address[0]
+
+    def is_suspicious_ip(self, ip):
+        suspicious = {"127.0.0.1", "::1", "0.0.0.0", "localhost"}
+        if ip in suspicious:
+            return True
+        if ip.startswith("::ffff:127.") or ip.startswith("::ffff:0:"):
+            return True
+        return False
+
     def handle_login(self):
+        client_ip = self.get_client_ip()
+        config = load_config()
+        debug = config.get("debug", False)
+        rate_limit_interval = config.get("rate_limit_interval", 60)
+
+        if not debug and self.is_suspicious_ip(client_ip):
+            login_html = load_template("login")
+            error_html = login_html.replace("</form>", '<p class="error">环境异常，拒绝访问</p></form>')
+            self.send_html(error_html, 403)
+            return
+
+        now = time.time()
+        last_fail = login_failures.get(client_ip)
+        if last_fail and (now - last_fail) < rate_limit_interval:
+            remaining = int(rate_limit_interval - (now - last_fail))
+            login_html = load_template("login")
+            error_html = login_html.replace("</form>", f'<p class="error">登录尝试过于频繁，请{remaining}s后重试</p></form>')
+            self.send_html(error_html, 429)
+            return
+
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length).decode("utf-8")
         params = parse_qs(body)
@@ -565,12 +603,14 @@ class NASHandler(BaseHTTPRequestHandler):
         password = params.get("password", [""])[0]
 
         if verify_user(username, password):
+            login_failures.pop(client_ip, None)
             token = create_session_token(username)
             self.send_response(302)
             self.send_header("Location", "/")
             self.send_header("Set-Cookie", generate_session_cookie(token))
             self.end_headers()
         else:
+            login_failures[client_ip] = time.time()
             login_html = load_template("login")
             error_html = login_html.replace("</form>", '<p class="error">用户名或密码错误</p></form>')
             if username:
