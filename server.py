@@ -169,7 +169,7 @@ def parse_multipart_streaming(limited_reader, boundary, target_dir):
     return files
 
 
-HOST = "127.0.0.1"
+HOST = "0.0.0.0"
 PORT = 8888
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")
