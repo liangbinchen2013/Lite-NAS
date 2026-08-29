@@ -22,6 +22,8 @@
 
 ### 1. 配置用户
 
+**交互式配置：**
+
 ```bash
 python setup.py
 ```
@@ -29,8 +31,26 @@ python setup.py
 按提示输入：
 - 用户名
 - 密码（需确认）
+- NAS 名称，默认 Lite-NAS
 - 登录限流间隔（秒），默认 60
 - 调试模式（允许 127.0.0.1 登录），默认关闭
+
+**命令行参数配置：**
+
+```bash
+python setup.py --username admin --password 123456 --nas-name "我的云盘"
+```
+
+| 参数 | 简写 | 说明 | 示例 |
+|------|------|------|------|
+| `--username` | `-u` | 登录用户名 | `--username admin` |
+| `--password` | `-p` | 登录密码 | `--password 123456` |
+| `--nas-name` | `-n` | NAS 显示名称 | `--nas-name "我的云盘"` |
+| `--rate-limit` | `-r` | 登录限流间隔（秒） | `--rate-limit 120` |
+| `--debug` | `-d` | 启用调试模式 | `--debug` |
+| `--no-debug` | | 禁用调试模式 | `--no-debug` |
+
+可混合使用命令行参数，未指定的参数保留原值或使用默认值。
 
 自动生成 `config.json`。
 
@@ -70,6 +90,7 @@ Lite-NAS/
 |------|------|--------|
 | `username` | 登录用户名 | - |
 | `password` | 密码（MD5 哈希） | - |
+| `nas_name` | NAS 显示名称 | Lite-NAS |
 | `rate_limit_interval` | 登录失败后限流间隔（秒） | 60 |
 | `debug` | 调试模式，允许 127.0.0.1 登录 | false |
 
