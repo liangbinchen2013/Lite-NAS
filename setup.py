@@ -37,6 +37,11 @@ def setup():
         print("两次密码不一致")
         return
 
+    default_nas_name = old_config.get("nas_name", "Lite-NAS")
+    nas_name = input(f"NAS名称 [默认{default_nas_name}]: ").strip()
+    if not nas_name:
+        nas_name = default_nas_name
+
     default_interval = old_config.get("rate_limit_interval", 60)
     interval_input = input(f"登录限流间隔(秒) [默认{default_interval}]: ").strip()
     if interval_input:
@@ -57,6 +62,7 @@ def setup():
     config = {
         "username": username,
         "password": md5_hash(password),
+        "nas_name": nas_name,
         "rate_limit_interval": rate_limit_interval,
         "debug": debug
     }
@@ -65,6 +71,7 @@ def setup():
         json.dump(config, f, indent=2, ensure_ascii=False)
 
     print(f"\n配置完成！用户: {username}")
+    print(f"NAS名称: {nas_name}")
     print(f"限流间隔: {rate_limit_interval}秒")
     print(f"调试模式: {'开启' if debug else '关闭'}")
 

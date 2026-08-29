@@ -189,7 +189,7 @@ def load_config():
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
-        return {"username": "", "password": ""}
+        return {"username": "", "password": "", "nas_name": "Lite-NAS"}
 
 
 def md5_hash(password):
@@ -501,7 +501,10 @@ def get_file_list_html(username, rel_path=""):
             breadcrumb_html += f'<a href="/" class="crumb-link">{crumb["name"]}</a>'
 
     html = load_template("index")
+    config = load_config()
+    nas_name = config.get("nas_name", "Lite-NAS")
     return (html.replace("{{username}}", username)
+                .replace("{{nas_name}}", nas_name)
                 .replace("{{storage}}", format_size(total_size))
                 .replace("{{file_rows}}", file_rows)
                 .replace("{{breadcrumb}}", breadcrumb_html)
@@ -583,6 +586,8 @@ class NASHandler(BaseHTTPRequestHandler):
 
         if not debug and self.is_suspicious_ip(client_ip):
             login_html = load_template("login")
+            nas_name = config.get("nas_name", "Lite-NAS")
+            login_html = login_html.replace("{{nas_name}}", nas_name)
             error_html = login_html.replace("</form>", '<p class="error">环境异常，拒绝访问</p></form>')
             self.send_html(error_html, 403)
             return
@@ -592,6 +597,8 @@ class NASHandler(BaseHTTPRequestHandler):
         if last_fail and (now - last_fail) < rate_limit_interval:
             remaining = int(rate_limit_interval - (now - last_fail))
             login_html = load_template("login")
+            nas_name = config.get("nas_name", "Lite-NAS")
+            login_html = login_html.replace("{{nas_name}}", nas_name)
             error_html = login_html.replace("</form>", f'<p class="error">登录尝试过于频繁，请{remaining}s后重试</p></form>')
             self.send_html(error_html, 429)
             return
@@ -612,6 +619,8 @@ class NASHandler(BaseHTTPRequestHandler):
         else:
             login_failures[client_ip] = time.time()
             login_html = load_template("login")
+            nas_name = config.get("nas_name", "Lite-NAS")
+            login_html = login_html.replace("{{nas_name}}", nas_name)
             error_html = login_html.replace("</form>", '<p class="error">用户名或密码错误</p></form>')
             if username:
                 error_html = error_html.replace('value=""', f'value="{username}"')
@@ -968,7 +977,11 @@ class NASHandler(BaseHTTPRequestHandler):
             if valid:
                 self.send_redirect("/")
                 return
-            self.send_html(load_template("login"))
+            login_html = load_template("login")
+            config = load_config()
+            nas_name = config.get("nas_name", "Lite-NAS")
+            login_html = login_html.replace("{{nas_name}}", nas_name)
+            self.send_html(login_html)
         elif path == "/logout":
             token = self.get_cookie("session")
             if token and token in sessions:
