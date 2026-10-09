@@ -321,8 +321,11 @@ def state_janitor():
             pass
 
 
-def generate_session_cookie(token):
-    return f"session={token}; Path=/; HttpOnly; SameSite=Strict"
+def generate_session_cookie(token, secure):
+    flags = "Path=/; HttpOnly; SameSite=Strict"
+    if secure:
+        flags += "; Secure"
+    return f"session={token}; {flags}"
 
 
 def get_dir_size(path):
@@ -660,12 +663,32 @@ def get_file_list_html(username, rel_path=""):
 MAX_CONCURRENT_CONNECTIONS = 64
 connection_slots = threading.BoundedSemaphore(MAX_CONCURRENT_CONNECTIONS)
 
+# 页面脚本与样式都是内联的，因此必须放行 'unsafe-inline'；
+# 其余来源一律禁止，可挡住被注入标签后拉外部脚本、劫持表单和嵌框。
+SECURITY_HEADERS = (
+    ("Content-Security-Policy",
+     "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; "
+     "img-src 'self' data:; connect-src 'self'; form-action 'self'; "
+     "frame-ancestors 'none'; base-uri 'none'; object-src 'none'"),
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Referrer-Policy", "same-origin"),
+)
+
 
 class NASHandler(BaseHTTPRequestHandler):
     timeout = 30
 
     def log_message(self, format, *args):
         pass
+
+    def version_string(self):
+        return "Lite-NAS"
+
+    def end_headers(self):
+        for name, value in SECURITY_HEADERS:
+            self.send_header(name, value)
+        BaseHTTPRequestHandler.end_headers(self)
 
     def handle(self):
         if not connection_slots.acquire(blocking=False):
@@ -731,6 +754,13 @@ class NASHandler(BaseHTTPRequestHandler):
     def is_suspicious_ip(self, ip):
         return ip in ("0.0.0.0", "localhost") or is_loopback_addr(ip)
 
+    def is_https_origin(self):
+        # 只有同机反代（隧道）声明的 X-Forwarded-Proto 才可信，理由同 CF-Connecting-IP
+        if not is_loopback_addr(self.client_address[0]):
+            return False
+        proto = self.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower()
+        return proto == "https"
+
     def handle_login(self):
         client_ip = self.get_client_ip()
         config = load_config()
@@ -761,7 +791,7 @@ class NASHandler(BaseHTTPRequestHandler):
             token = create_session_token(username)
             self.send_response(302)
             self.send_header("Location", "/")
-            self.send_header("Set-Cookie", generate_session_cookie(token))
+            self.send_header("Set-Cookie", generate_session_cookie(token, self.is_https_origin()))
             self.end_headers()
         else:
             login_failures[client_ip] = time.time()
@@ -1143,7 +1173,10 @@ class NASHandler(BaseHTTPRequestHandler):
                 del sessions[token]
             self.send_response(302)
             self.send_header("Location", "/login")
-            self.send_header("Set-Cookie", "session=; Path=/; Max-Age=0")
+            clear_cookie = "session=; Path=/; Max-Age=0"
+            if self.is_https_origin():
+                clear_cookie += "; Secure"
+            self.send_header("Set-Cookie", clear_cookie)
             self.end_headers()
         elif path.startswith("/download/"):
             filename = unquote(path[len("/download/"):])

@@ -97,6 +97,8 @@ Lite-NAS/
 ## 安全特性
 
 - **口令存储**：PBKDF2-SHA256 + 随机盐；旧版 MD5 配置在下次登录成功时自动升级，无需重新配置
+- **会话 Cookie**：`HttpOnly` + `SameSite=Strict`（可挡跨站表单提交）；空闲 1 天或累计 7 天过期，服务重启后失效
+- **响应加固**：所有响应附带 CSP（禁外部脚本、禁嵌框、限表单与请求同源）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: same-origin`，`Server` 头不暴露运行时版本
 - **登录限流**：连续登录失败后，该 IP 将被限流，间隔时间可配置
 - **客户端 IP 判定**：仅当 TCP 对端是本机回环地址（说明前面是同机的 Cloudflare Tunnel / Nginx）时才采信 `CF-Connecting-IP`；其余连接一律使用真实对端地址，避免伪造请求头绕过限流或定向锁死他人 IP
 - **环境异常检测**：识别 127.0.0.1 / ::1 / 0.0.0.0 等回环地址
