@@ -217,6 +217,8 @@ login_failures = {}
 
 zip_tasks = {}
 ZIP_TASKS_DIR = os.path.join(BASE_DIR, ".zip_tasks")
+ZIP_TASK_TTL = 600
+MAX_ZIP_TASKS = 4
 
 
 def load_config():
@@ -385,6 +387,7 @@ def zip_create_task(file_list, compression_level, compresslevel=None, archive_ty
 
     def run_archive():
         task = zip_tasks[task_id]
+        out_path = None
         try:
             if archive_type == "tar":
                 out_path = os.path.join(ZIP_TASKS_DIR, f"{task_id}.tar")
@@ -432,9 +435,14 @@ def zip_create_task(file_list, compression_level, compresslevel=None, archive_ty
             task["status"] = "done"
             task["out_path"] = out_path
             task["archive_type"] = archive_type
+            if task_id not in zip_tasks:
+                # 压缩期间任务已被回收（如超过 TTL），归档不能再留在盘上
+                remove_quietly(out_path)
         except Exception as e:
             task["status"] = "error"
             task["error"] = str(e)
+            if task_id not in zip_tasks:
+                remove_quietly(out_path)
 
     total_files, _ = count_files_and_size(file_list)
     zip_tasks[task_id] = {
@@ -451,26 +459,35 @@ def zip_create_task(file_list, compression_level, compresslevel=None, archive_ty
     return task_id
 
 
+def remove_quietly(path):
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def zip_drop_task(task_id):
+    task = zip_tasks.pop(task_id, None)
+    if task:
+        remove_quietly(task.get("out_path"))
+
+
+def zip_sweep():
+    now = time.time()
+    for task_id in [k for k, v in zip_tasks.items() if now - v["time"] > ZIP_TASK_TTL]:
+        zip_drop_task(task_id)
+
+
 def zip_get_progress(task_id):
     task = zip_tasks.get(task_id)
     if not task:
         return None
-    if time.time() - task["time"] > 600:
-        del zip_tasks[task_id]
+    if time.time() - task["time"] > ZIP_TASK_TTL:
+        zip_drop_task(task_id)
         return None
     return task
-
-
-def zip_cleanup():
-    now = time.time()
-    expired = [k for k, v in zip_tasks.items() if now - v["time"] > 600]
-    for k in expired:
-        task = zip_tasks.pop(k, None)
-        if task and task.get("out_path") and os.path.exists(task["out_path"]):
-            try:
-                os.remove(task["out_path"])
-            except OSError:
-                pass
 
 
 def get_file_ext_type(name):
@@ -864,7 +881,10 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_text("Unauthorized", 401)
             return
 
-        zip_cleanup()
+        zip_sweep()
+        if sum(1 for t in zip_tasks.values() if t["status"] == "compressing") >= MAX_ZIP_TASKS:
+            self.send_text("压缩任务已满，请稍后再试", 429)
+            return
 
         body = read_form_body(self)
         if body is None:
@@ -979,11 +999,7 @@ class NASHandler(BaseHTTPRequestHandler):
         except Exception as e:
             print(f"Archive download error: {e}")
 
-        try:
-            os.remove(out_path)
-        except OSError:
-            pass
-        zip_tasks.pop(task_id, None)
+        zip_drop_task(task_id)
 
     def handle_api_folders(self):
         valid, username = self.is_authenticated()
@@ -1128,8 +1144,18 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_text("Not found", 404)
 
 
+def sweep_zip_tasks_dir():
+    if not os.path.isdir(ZIP_TASKS_DIR):
+        return
+    for name in os.listdir(ZIP_TASKS_DIR):
+        path = os.path.join(ZIP_TASKS_DIR, name)
+        if os.path.isfile(path):
+            remove_quietly(path)
+
+
 def main():
     os.makedirs(STORAGE_DIR, exist_ok=True)
+    sweep_zip_tasks_dir()
 
     class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
         daemon_threads = True
