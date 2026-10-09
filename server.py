@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer
 from urllib.parse import parse_qs, urlparse, unquote, quote
+from html import escape as html_escape
 import mimetypes
 
 
@@ -250,6 +251,18 @@ def load_template(name):
         return f.read()
 
 
+def esc(value):
+    return html_escape(str(value), quote=True)
+
+
+def render_login_page(error=None):
+    nas_name = esc(load_config().get("nas_name", "Lite-NAS"))
+    html = load_template("login").replace("{{nas_name}}", nas_name)
+    if error:
+        html = html.replace("</form>", f'<p class="error">{error}</p></form>')
+    return html
+
+
 def safe_path(rel_path):
     rel_path = rel_path.strip("/")
     if not rel_path:
@@ -437,8 +450,8 @@ def get_file_list_html(username, rel_path=""):
 
     file_rows = ""
     for item in items:
-        encoded_name = item["name"].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        url_name = quote(item["name"])
+        encoded_name = esc(item["name"])
+        encoded_type = esc(item["type"])
         date_str = time.strftime("%Y/%m/%d %H:%M", time.localtime(item["mtime"]))
         item_path = rel_path + "/" + item["name"] if rel_path else item["name"]
         item_path_encoded = quote(item_path, safe="")
@@ -456,7 +469,7 @@ def get_file_list_html(username, rel_path=""):
           <td>-</td>
           <td class="action-cell">
             <button class="btn btn-move" onclick="showMoveForItem('{item_path_encoded}')">移动</button>
-            <form method="POST" action="/delete" style="display:inline" onsubmit="return confirm('确定删除文件夹 {encoded_name} 及其所有内容吗？')">
+            <form method="POST" action="/delete" style="display:inline" data-name="{encoded_name}" data-kind="文件夹" onsubmit="return confirmDelete(this)">
               <input type="hidden" name="filename" value="{quote(item['name'])}">
               <input type="hidden" name="is_dir" value="1">
               <input type="hidden" name="current_path" value="{quote(rel_path, safe='')}">
@@ -473,12 +486,12 @@ def get_file_list_html(username, rel_path=""):
           <td><input type="checkbox" class="file-check" value="{item_path_encoded}"></td>
           <td><a href="/download/{url_file}" class="file-link">{encoded_name}</a></td>
           <td>{date_str}</td>
-          <td>{item['type']}</td>
+          <td>{encoded_type}</td>
           <td>{format_size(item['size'])}</td>
           <td class="action-cell">
             <button class="btn btn-move" onclick="showMoveForItem('{item_path_encoded}')">移动</button>
             <a href="/download/{url_file}" class="btn btn-download" title="下载">下载</a>
-            <form method="POST" action="/delete" style="display:inline" onsubmit="return confirm('确定删除 {encoded_name} 吗？')">
+            <form method="POST" action="/delete" style="display:inline" data-name="{encoded_name}" data-kind="" onsubmit="return confirmDelete(this)">
               <input type="hidden" name="filename" value="{quote(item['name'])}">
               <input type="hidden" name="is_dir" value="0">
               <input type="hidden" name="current_path" value="{quote(rel_path, safe='')}">
@@ -494,17 +507,18 @@ def get_file_list_html(username, rel_path=""):
     for i, crumb in enumerate(breadcrumb):
         if i > 0:
             breadcrumb_html += '<span class="sep">/</span>'
+        name = esc(crumb["name"])
         if crumb["path"]:
             url_crumb = quote(crumb["path"], safe="")
-            breadcrumb_html += f'<a href="/folder/{url_crumb}" class="crumb-link">{crumb["name"]}</a>'
+            breadcrumb_html += f'<a href="/folder/{url_crumb}" class="crumb-link">{name}</a>'
         else:
-            breadcrumb_html += f'<a href="/" class="crumb-link">{crumb["name"]}</a>'
+            breadcrumb_html += f'<a href="/" class="crumb-link">{name}</a>'
 
     html = load_template("index")
     config = load_config()
     nas_name = config.get("nas_name", "Lite-NAS")
-    return (html.replace("{{username}}", username)
-                .replace("{{nas_name}}", nas_name)
+    return (html.replace("{{username}}", esc(username))
+                .replace("{{nas_name}}", esc(nas_name))
                 .replace("{{storage}}", format_size(total_size))
                 .replace("{{file_rows}}", file_rows)
                 .replace("{{breadcrumb}}", breadcrumb_html)
@@ -585,22 +599,14 @@ class NASHandler(BaseHTTPRequestHandler):
         rate_limit_interval = config.get("rate_limit_interval", 60)
 
         if not debug and self.is_suspicious_ip(client_ip):
-            login_html = load_template("login")
-            nas_name = config.get("nas_name", "Lite-NAS")
-            login_html = login_html.replace("{{nas_name}}", nas_name)
-            error_html = login_html.replace("</form>", '<p class="error">环境异常，拒绝访问</p></form>')
-            self.send_html(error_html, 403)
+            self.send_html(render_login_page("环境异常，拒绝访问"), 403)
             return
 
         now = time.time()
         last_fail = login_failures.get(client_ip)
         if last_fail and (now - last_fail) < rate_limit_interval:
             remaining = int(rate_limit_interval - (now - last_fail))
-            login_html = load_template("login")
-            nas_name = config.get("nas_name", "Lite-NAS")
-            login_html = login_html.replace("{{nas_name}}", nas_name)
-            error_html = login_html.replace("</form>", f'<p class="error">登录尝试过于频繁，请{remaining}s后重试</p></form>')
-            self.send_html(error_html, 429)
+            self.send_html(render_login_page(f"登录尝试过于频繁，请{remaining}s后重试"), 429)
             return
 
         length = int(self.headers.get("Content-Length", 0))
@@ -618,13 +624,7 @@ class NASHandler(BaseHTTPRequestHandler):
             self.end_headers()
         else:
             login_failures[client_ip] = time.time()
-            login_html = load_template("login")
-            nas_name = config.get("nas_name", "Lite-NAS")
-            login_html = login_html.replace("{{nas_name}}", nas_name)
-            error_html = login_html.replace("</form>", '<p class="error">用户名或密码错误</p></form>')
-            if username:
-                error_html = error_html.replace('value=""', f'value="{username}"')
-            self.send_html(error_html, 401)
+            self.send_html(render_login_page("用户名或密码错误"), 401)
 
     def handle_upload(self):
         valid, username = self.is_authenticated()
@@ -977,11 +977,7 @@ class NASHandler(BaseHTTPRequestHandler):
             if valid:
                 self.send_redirect("/")
                 return
-            login_html = load_template("login")
-            config = load_config()
-            nas_name = config.get("nas_name", "Lite-NAS")
-            login_html = login_html.replace("{{nas_name}}", nas_name)
-            self.send_html(login_html)
+            self.send_html(render_login_page())
         elif path == "/logout":
             token = self.get_cookie("session")
             if token and token in sessions:
