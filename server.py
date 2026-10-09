@@ -358,14 +358,16 @@ def generate_session_cookie(token, secure):
     return f"session={token}; {flags}"
 
 
-def get_dir_size(path):
+def get_total_size(root):
     total = 0
-    if os.path.exists(path):
-        for dirpath, dirnames, filenames in os.walk(path):
-            for f in filenames:
-                fp = os.path.join(dirpath, f)
+    for dirpath, dirnames, filenames in os.walk(root):
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            try:
                 if os.path.isfile(fp):
                     total += os.path.getsize(fp)
+            except OSError:
+                continue
     return total
 
 
@@ -599,7 +601,7 @@ def get_file_list_html(username, rel_path=""):
         for f in os.listdir(current_dir):
             fp = os.path.join(current_dir, f)
             if os.path.isdir(fp):
-                dirs.append({"name": f, "is_dir": True, "size": get_dir_size(fp),
+                dirs.append({"name": f, "is_dir": True,
                              "mtime": os.path.getmtime(fp), "type": "文件夹"})
             else:
                 size = os.path.getsize(fp)
@@ -610,7 +612,7 @@ def get_file_list_html(username, rel_path=""):
     files.sort(key=lambda x: x["name"].lower())
     items = dirs + files
 
-    total_size = get_dir_size(STORAGE_DIR)
+    total_size = get_total_size(STORAGE_DIR)
     breadcrumb = build_breadcrumb(rel_path)
 
     file_rows = ""
