@@ -20,6 +20,14 @@ import mimetypes
 
 
 CHUNK_SIZE = 65536
+MAX_FORM_BODY = 65536
+
+
+def read_form_body(handler):
+    length = handler.headers.get("Content-Length", "").strip()
+    if not length.isdigit() or int(length) > MAX_FORM_BODY:
+        return None
+    return handler.rfile.read(int(length)).decode("utf-8", errors="replace")
 
 
 class LengthLimitedReader:
@@ -541,11 +549,19 @@ def get_file_list_html(username, rel_path=""):
                 .replace("{{current_path}}", quote(rel_path, safe="")))
 
 
+MAX_CONCURRENT_CONNECTIONS = 64
+connection_slots = threading.BoundedSemaphore(MAX_CONCURRENT_CONNECTIONS)
+
+
 class NASHandler(BaseHTTPRequestHandler):
+    timeout = 30
+
     def log_message(self, format, *args):
         pass
 
     def handle(self):
+        if not connection_slots.acquire(blocking=False):
+            return
         try:
             self.close_connection = True
             self.handle_one_request()
@@ -553,6 +569,8 @@ class NASHandler(BaseHTTPRequestHandler):
             pass
         except Exception:
             pass
+        finally:
+            connection_slots.release()
 
     def send_html(self, html, status=200):
         try:
@@ -622,8 +640,10 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_html(render_login_page(f"登录尝试过于频繁，请{remaining}s后重试"), 429)
             return
 
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode("utf-8")
+        body = read_form_body(self)
+        if body is None:
+            self.send_text("Bad request", 400)
+            return
         params = parse_qs(body)
         username = params.get("username", [""])[0]
         password = params.get("password", [""])[0]
@@ -656,7 +676,11 @@ class NASHandler(BaseHTTPRequestHandler):
             return
         boundary = m.group(1).strip().strip('"')
 
-        length = int(self.headers.get("Content-Length", 0))
+        length = self.headers.get("Content-Length", "").strip()
+        if not length.isdigit():
+            self.send_text("Bad request", 400)
+            return
+        content_length = int(length)
         raw_path = self.headers.get("X-Current-Path", "")
         current_path = unquote(raw_path) if raw_path else ""
         target_dir = safe_path(current_path)
@@ -666,7 +690,7 @@ class NASHandler(BaseHTTPRequestHandler):
         os.makedirs(target_dir, exist_ok=True)
 
         try:
-            limited = LengthLimitedReader(self.rfile, length)
+            limited = LengthLimitedReader(self.rfile, content_length)
             files = parse_multipart_streaming(limited, boundary, target_dir)
             if not files:
                 self.send_text("No file", 400)
@@ -717,8 +741,10 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_redirect("/login")
             return
 
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode("utf-8")
+        body = read_form_body(self)
+        if body is None:
+            self.send_text("Bad request", 400)
+            return
         params = parse_qs(body)
         name = unquote(params.get("filename", [""])[0])
         is_dir = params.get("is_dir", ["0"])[0] == "1"
@@ -749,8 +775,10 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_redirect("/login")
             return
 
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode("utf-8")
+        body = read_form_body(self)
+        if body is None:
+            self.send_text("Bad request", 400)
+            return
         params = parse_qs(body)
         folder_name = unquote(params.get("folder_name", [""])[0]).strip()
         current_path = unquote(params.get("current_path", [""])[0])
@@ -773,8 +801,10 @@ class NASHandler(BaseHTTPRequestHandler):
 
         zip_cleanup()
 
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode("utf-8")
+        body = read_form_body(self)
+        if body is None:
+            self.send_text("Bad request", 400)
+            return
         params = parse_qs(body)
         file_list_str = params.get("files", [""])[0]
         compression = params.get("compression", ["none"])[0]
@@ -915,8 +945,10 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_text("Unauthorized", 401)
             return
 
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode("utf-8")
+        body = read_form_body(self)
+        if body is None:
+            self.send_text("Bad request", 400)
+            return
         params = parse_qs(body)
         source_str = params.get("source", [""])[0]
         target_dir = params.get("target_dir", [""])[0]
