@@ -244,12 +244,19 @@ ZIP_TASK_TTL = 600
 MAX_ZIP_TASKS = 4
 
 
+DEFAULT_CONFIG = {"username": "", "password": "", "nas_name": "Lite-NAS"}
+
+
 def load_config():
     try:
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"username": "", "password": "", "nas_name": "Lite-NAS"}
+            config = json.load(f)
+    except (OSError, ValueError):
+        # 文件缺失/无权限/JSON 损坏都退回空配置，不能让登录与列表请求抛异常
+        return dict(DEFAULT_CONFIG)
+    if not isinstance(config, dict):
+        return dict(DEFAULT_CONFIG)
+    return config
 
 
 PBKDF2_ITERATIONS = 210000
@@ -395,7 +402,7 @@ def safe_path(rel_path):
     fp = os.path.join(STORAGE_DIR, *parts) if parts else STORAGE_DIR
     real_storage = os.path.realpath(STORAGE_DIR)
     real_fp = os.path.realpath(fp)
-    if not real_fp.startswith(real_storage):
+    if real_fp != real_storage and not real_fp.startswith(real_storage + os.sep):
         return None
     return fp
 
