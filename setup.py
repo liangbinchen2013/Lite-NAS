@@ -1,13 +1,9 @@
-import hashlib
 import json
 import getpass
 import argparse
+from server import hash_password
 
 CONFIG_FILE = "config.json"
-
-
-def md5_hash(password):
-    return hashlib.md5(password.encode()).hexdigest()
 
 
 def load_config():
@@ -62,7 +58,7 @@ def setup_interactive():
 
     config = {
         "username": username,
-        "password": md5_hash(password),
+        "password": hash_password(password),
         "nas_name": nas_name,
         "rate_limit_interval": rate_limit_interval,
         "debug": debug
@@ -85,7 +81,7 @@ def setup_command_line(args):
         config["username"] = args.username
 
     if args.password:
-        config["password"] = md5_hash(args.password)
+        config["password"] = hash_password(args.password)
 
     if args.nas_name is not None:
         config["nas_name"] = args.nas_name

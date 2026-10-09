@@ -1,5 +1,6 @@
 import os
 import hashlib
+import hmac
 import secrets
 import time
 import re
@@ -202,14 +203,48 @@ def load_config():
         return {"username": "", "password": "", "nas_name": "Lite-NAS"}
 
 
+PBKDF2_ITERATIONS = 210000
+
+
+def hash_password(password, iterations=PBKDF2_ITERATIONS):
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+
+
 def md5_hash(password):
     return hashlib.md5(password.encode()).hexdigest()
 
 
+def verify_password(password, stored):
+    if not isinstance(stored, str) or not stored:
+        return False
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, iterations, salt_hex, hash_hex = stored.split("$")
+            digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                         bytes.fromhex(salt_hex), int(iterations))
+        except ValueError:
+            return False
+        return hmac.compare_digest(digest.hex(), hash_hex)
+    return hmac.compare_digest(md5_hash(password), stored)
+
+
+def save_config(config):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+
+
 def verify_user(username, password):
     config = load_config()
-    return (username == config["username"] and
-            md5_hash(password) == config["password"])
+    stored = config.get("password", "")
+    if not (username == config.get("username") and verify_password(password, stored)):
+        return False
+    if not stored.startswith("pbkdf2_sha256$"):
+        # 旧版 config 存的是无盐 MD5，借这次成功的明文口令就地升级
+        config["password"] = hash_password(password)
+        save_config(config)
+    return True
 
 
 def create_session_token(username):
