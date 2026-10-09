@@ -1,4 +1,5 @@
 config.json
 storage/
+nas.log*
 __pycache__/
 *.pyc

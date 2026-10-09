@@ -78,6 +78,7 @@ Lite-NAS/
 │   └── index.html     # 文件管理页
 ├── storage/           # 文件存储目录（已 gitignore）
 ├── .zip_tasks/        # 临时压缩文件（自动清理）
+├── nas.log            # 审计日志，2MB×3 滚动（已 gitignore）
 ├── .gitignore
 └── README.md
 ```
@@ -97,6 +98,7 @@ Lite-NAS/
 ## 安全特性
 
 - **口令存储**：PBKDF2-SHA256 + 随机盐；旧版 MD5 配置在下次登录成功时自动升级，无需重新配置
+- **审计日志**：登录成功/失败、被限流、上传、下载、删除、移动、登出均记入 `nas.log`（含用户名与客户端 IP），2MB×3 滚动，目录不可写时服务仍正常启动
 - **会话 Cookie**：`HttpOnly` + `SameSite=Strict`（可挡跨站表单提交）；空闲 1 天或累计 7 天过期，服务重启后失效
 - **响应加固**：所有响应附带 CSP（禁外部脚本、禁嵌框、限表单与请求同源）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: same-origin`，`Server` 头不暴露运行时版本
 - **登录限流**：连续登录失败后，该 IP 将被限流，间隔时间可配置

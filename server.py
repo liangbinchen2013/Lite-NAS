@@ -6,12 +6,14 @@ import time
 import re
 import json
 import shutil
+import logging
 import zipfile
 import tarfile
 import io
 import ipaddress
 import threading
 import uuid
+from logging.handlers import RotatingFileHandler
 from http.server import BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from http.server import HTTPServer
@@ -210,6 +212,23 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
+AUDIT_LOG_FILE = os.path.join(BASE_DIR, "nas.log")
+
+audit_log = logging.getLogger("lite-nas")
+
+
+def setup_audit_log():
+    handler = RotatingFileHandler(AUDIT_LOG_FILE, maxBytes=2 * 1024 * 1024,
+                                  backupCount=2, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S"))
+    audit_log.addHandler(handler)
+    audit_log.setLevel(logging.INFO)
+    audit_log.propagate = False
+
+
+def one_line(value, limit=200):
+    # 文件名/用户名可能带换行，不处理会被用来伪造审计日志行
+    return str(value).replace("\r", " ").replace("\n", " ")[:limit]
 
 sessions = {}
 
@@ -768,6 +787,7 @@ class NASHandler(BaseHTTPRequestHandler):
         rate_limit_interval = config.get("rate_limit_interval", 60)
 
         if not debug and self.is_suspicious_ip(client_ip):
+            audit_log.warning("login blocked (loopback, debug off) ip=%s", client_ip)
             self.send_html(render_login_page("环境异常，拒绝访问"), 403)
             return
 
@@ -775,6 +795,7 @@ class NASHandler(BaseHTTPRequestHandler):
         last_fail = login_failures.get(client_ip)
         if last_fail and (now - last_fail) < rate_limit_interval:
             remaining = int(rate_limit_interval - (now - last_fail))
+            audit_log.warning("login rate limited ip=%s retry_in=%ss", client_ip, remaining)
             self.send_html(render_login_page(f"登录尝试过于频繁，请{remaining}s后重试"), 429)
             return
 
@@ -789,12 +810,14 @@ class NASHandler(BaseHTTPRequestHandler):
         if verify_user(username, password):
             login_failures.pop(client_ip, None)
             token = create_session_token(username)
+            audit_log.info("login ok user=%s ip=%s", one_line(username), client_ip)
             self.send_response(302)
             self.send_header("Location", "/")
             self.send_header("Set-Cookie", generate_session_cookie(token, self.is_https_origin()))
             self.end_headers()
         else:
             login_failures[client_ip] = time.time()
+            audit_log.warning("login failed user=%s ip=%s", one_line(username), client_ip)
             self.send_html(render_login_page("用户名或密码错误"), 401)
 
     def handle_upload(self):
@@ -830,17 +853,24 @@ class NASHandler(BaseHTTPRequestHandler):
         try:
             limited = LengthLimitedReader(self.rfile, content_length)
             files, renamed, truncated = parse_multipart_streaming(limited, boundary, target_dir)
+            client_ip = self.get_client_ip()
             if truncated:
+                audit_log.warning("upload truncated user=%s ip=%s dropped=%s",
+                                  username, client_ip, one_line("；".join(truncated)))
                 self.send_text("上传中断，已丢弃不完整文件：" + "；".join(truncated), 400)
                 return
             if not files:
                 self.send_text("No file", 400)
                 return
+            audit_log.info("upload user=%s ip=%s path=%s files=%s renamed=%s",
+                           username, client_ip, one_line(current_path) or "/",
+                           one_line("；".join(files)), one_line("；".join(renamed)) or "-")
             if renamed:
                 self.send_text("OK\n已有同名文件，已重命名：" + "；".join(renamed))
             else:
                 self.send_text("OK")
         except Exception:
+            audit_log.error("upload error user=%s path=%s", username, one_line(current_path))
             self.send_text("Upload error", 500)
 
     def handle_download(self, filename):
@@ -851,8 +881,12 @@ class NASHandler(BaseHTTPRequestHandler):
 
         filepath = safe_path(filename)
         if not filepath or not os.path.exists(filepath) or not os.path.isfile(filepath):
+            audit_log.warning("download not found user=%s ip=%s file=%s",
+                              username, self.get_client_ip(), one_line(filename))
             self.send_text("File not found", 404)
             return
+        audit_log.info("download user=%s ip=%s file=%s size=%s",
+                       username, self.get_client_ip(), one_line(filename), format_size(os.path.getsize(filepath)))
 
         try:
             mime, _ = mimetypes.guess_type(filepath)
@@ -899,6 +933,7 @@ class NASHandler(BaseHTTPRequestHandler):
             return
 
         target = safe_path(current_path + "/" + name if current_path else name)
+        kind = "folder" if is_dir else "file"
         if target and os.path.exists(target):
             if is_dir:
                 shutil.rmtree(target, ignore_errors=True)
@@ -907,6 +942,11 @@ class NASHandler(BaseHTTPRequestHandler):
                     os.remove(target)
                 except IsADirectoryError:
                     shutil.rmtree(target, ignore_errors=True)
+            audit_log.warning("delete user=%s ip=%s %s=%s", username, self.get_client_ip(),
+                              kind, one_line(target.replace(STORAGE_DIR, "storage")))
+        else:
+            audit_log.warning("delete missed user=%s ip=%s name=%s",
+                              username, self.get_client_ip(), one_line(name))
 
         redir = f"/folder/{quote(current_path, safe='')}" if current_path else "/"
         self.send_response(302)
@@ -931,6 +971,8 @@ class NASHandler(BaseHTTPRequestHandler):
             target = safe_path(current_path + "/" + folder_name if current_path else folder_name)
             if target:
                 os.makedirs(target, exist_ok=True)
+                audit_log.info("mkdir user=%s ip=%s path=%s", username, self.get_client_ip(),
+                               one_line(os.path.relpath(target, STORAGE_DIR).replace("\\", "/")))
 
         redir = f"/folder/{quote(current_path, safe='')}" if current_path else "/"
         self.send_response(302)
@@ -1137,8 +1179,13 @@ class NASHandler(BaseHTTPRequestHandler):
                 continue
 
         if moved > 0:
+            audit_log.info("move user=%s ip=%s to=%s moved=%d sources=%s", username,
+                           self.get_client_ip(), one_line(unquote(target_dir)) or "/", moved,
+                           one_line("；".join(sources)))
             self.send_text("OK")
         else:
+            audit_log.warning("move nothing moved user=%s ip=%s sources=%s", username,
+                              self.get_client_ip(), one_line("；".join(sources)))
             self.send_text("No files moved", 400)
 
     def do_GET(self):
@@ -1169,8 +1216,11 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_html(render_login_page())
         elif path == "/logout":
             token = self.get_cookie("session")
+            valid, username = is_valid_session(token)
             if token and token in sessions:
                 del sessions[token]
+            if valid:
+                audit_log.info("logout user=%s ip=%s", username, self.get_client_ip())
             self.send_response(302)
             self.send_header("Location", "/login")
             clear_cookie = "session=; Path=/; Max-Age=0"
@@ -1219,6 +1269,10 @@ def sweep_zip_tasks_dir():
 
 
 def main():
+    try:
+        setup_audit_log()
+    except OSError as e:
+        print(f"审计日志不可写（{e}），仅本次进程不记录")
     os.makedirs(STORAGE_DIR, exist_ok=True)
     sweep_zip_tasks_dir()
     threading.Thread(target=state_janitor, daemon=True).start()
