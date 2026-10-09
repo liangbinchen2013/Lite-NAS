@@ -984,11 +984,12 @@ class NASHandler(BaseHTTPRequestHandler):
         if body is None:
             self.send_text("Bad request", 400)
             return
-        params = parse_qs(body)
+        params = parse_qs(body, keep_blank_values=True)
         source_str = params.get("source", [""])[0]
-        target_dir = params.get("target_dir", [""])[0]
+        # 移动到根目录时前端传空串，必须与“参数缺失”区分开
+        target_dir = params.get("target_dir", [None])[0]
 
-        if not source_str or not target_dir:
+        if not source_str or target_dir is None:
             self.send_text("Missing parameters", 400)
             return
 
