@@ -783,9 +783,6 @@ class NASHandler(BaseHTTPRequestHandler):
                     return value
         return peer
 
-    def is_suspicious_ip(self, ip):
-        return ip in ("0.0.0.0", "localhost") or is_loopback_addr(ip)
-
     def is_https_origin(self):
         # 只有同机反代（隧道）声明的 X-Forwarded-Proto 才可信，理由同 CF-Connecting-IP
         if not is_loopback_addr(self.client_address[0]):
@@ -795,14 +792,7 @@ class NASHandler(BaseHTTPRequestHandler):
 
     def handle_login(self):
         client_ip = self.get_client_ip()
-        config = load_config()
-        debug = config.get("debug", False)
-        rate_limit_interval = config.get("rate_limit_interval", 60)
-
-        if not debug and self.is_suspicious_ip(client_ip):
-            audit_log.warning("login blocked (loopback, debug off) ip=%s", client_ip)
-            self.send_html(render_login_page("环境异常，拒绝访问"), 403)
-            return
+        rate_limit_interval = load_config().get("rate_limit_interval", 60)
 
         now = time.time()
         last_fail = login_failures.get(client_ip)
