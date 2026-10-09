@@ -215,6 +215,10 @@ sessions = {}
 
 login_failures = {}
 
+SESSION_IDLE_TIMEOUT = 86400
+SESSION_ABSOLUTE_TIMEOUT = 7 * 86400
+STATE_SWEEP_INTERVAL = 600
+
 zip_tasks = {}
 ZIP_TASKS_DIR = os.path.join(BASE_DIR, ".zip_tasks")
 ZIP_TASK_TTL = 600
@@ -273,20 +277,48 @@ def verify_user(username, password):
     return True
 
 
+def session_expired(session, now):
+    return (now - session["time"] > SESSION_IDLE_TIMEOUT
+            or now - session["created"] > SESSION_ABSOLUTE_TIMEOUT)
+
+
 def create_session_token(username):
     token = secrets.token_hex(32)
-    sessions[token] = {"username": username, "time": time.time()}
+    now = time.time()
+    sessions[token] = {"username": username, "time": now, "created": now}
     return token
 
 
 def is_valid_session(token):
-    if token and token in sessions:
-        if time.time() - sessions[token]["time"] < 86400:
-            sessions[token]["time"] = time.time()
-            return True, sessions[token]["username"]
-        else:
-            del sessions[token]
-    return False, None
+    session = sessions.get(token) if token else None
+    if not session:
+        return False, None
+    now = time.time()
+    if session_expired(session, now):
+        sessions.pop(token, None)
+        return False, None
+    session["time"] = now
+    return True, session["username"]
+
+
+def sweep_stale_state():
+    now = time.time()
+    rate_interval = load_config().get("rate_limit_interval", 60)
+    for token in [t for t, s in sessions.items() if session_expired(s, now)]:
+        sessions.pop(token, None)
+    for ip in [i for i, failed_at in login_failures.items() if now - failed_at > rate_interval]:
+        login_failures.pop(ip, None)
+    zip_sweep()
+
+
+def state_janitor():
+    while True:
+        time.sleep(STATE_SWEEP_INTERVAL)
+        try:
+            sweep_stale_state()
+        except Exception:
+            # 配置读取等偶发异常不能让回收线程停摆
+            pass
 
 
 def generate_session_cookie(token):
@@ -1156,6 +1188,7 @@ def sweep_zip_tasks_dir():
 def main():
     os.makedirs(STORAGE_DIR, exist_ok=True)
     sweep_zip_tasks_dir()
+    threading.Thread(target=state_janitor, daemon=True).start()
 
     class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
         daemon_threads = True
