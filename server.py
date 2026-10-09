@@ -8,6 +8,7 @@ import shutil
 import zipfile
 import tarfile
 import io
+import ipaddress
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler
@@ -274,6 +275,21 @@ def safe_path(rel_path):
     if not real_fp.startswith(real_storage):
         return None
     return fp
+
+
+def parse_ip(value):
+    try:
+        addr = ipaddress.ip_address(value)
+    except ValueError:
+        return None
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+        addr = addr.ipv4_mapped
+    return addr
+
+
+def is_loopback_addr(ip):
+    addr = parse_ip(ip)
+    return bool(addr) and addr.is_loopback
 
 
 def count_files_and_size(file_list):
@@ -577,20 +593,17 @@ class NASHandler(BaseHTTPRequestHandler):
         return is_valid_session(token)
 
     def get_client_ip(self):
-        cf_ip = self.headers.get("CF-Connecting-IP", "").strip()
-        if cf_ip:
-            ip = cf_ip.split(",")[0].strip()
-            if ip:
-                return ip
-        return self.client_address[0]
+        peer = self.client_address[0]
+        # 代理头仅在 TCP 对端确为本机回环（CF Tunnel/Nginx 同机）时可信，否则客户端可自造 IP 绕过限流
+        if is_loopback_addr(peer):
+            for value in self.headers.get("CF-Connecting-IP", "").split(","):
+                value = value.strip()
+                if parse_ip(value):
+                    return value
+        return peer
 
     def is_suspicious_ip(self, ip):
-        suspicious = {"127.0.0.1", "::1", "0.0.0.0", "localhost"}
-        if ip in suspicious:
-            return True
-        if ip.startswith("::ffff:127.") or ip.startswith("::ffff:0:"):
-            return True
-        return False
+        return ip in ("0.0.0.0", "localhost") or is_loopback_addr(ip)
 
     def handle_login(self):
         client_ip = self.get_client_ip()
