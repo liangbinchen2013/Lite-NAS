@@ -861,9 +861,8 @@ class NASHandler(BaseHTTPRequestHandler):
         if not target_dir:
             self.send_text("Invalid path", 400)
             return
-        os.makedirs(target_dir, exist_ok=True)
-
         try:
+            os.makedirs(target_dir, exist_ok=True)
             limited = LengthLimitedReader(self.rfile, content_length)
             files, renamed, truncated = parse_multipart_streaming(limited, boundary, target_dir)
             client_ip = self.get_client_ip()
@@ -948,15 +947,23 @@ class NASHandler(BaseHTTPRequestHandler):
         target = safe_path(current_path + "/" + name if current_path else name)
         kind = "folder" if is_dir else "file"
         if target and os.path.exists(target):
-            if is_dir:
-                shutil.rmtree(target, ignore_errors=True)
-            else:
-                try:
-                    os.remove(target)
-                except IsADirectoryError:
+            failed = None
+            try:
+                if is_dir:
                     shutil.rmtree(target, ignore_errors=True)
-            audit_log.warning("delete user=%s ip=%s %s=%s", username, self.get_client_ip(),
-                              kind, one_line(target.replace(STORAGE_DIR, "storage")))
+                else:
+                    os.remove(target)
+            except IsADirectoryError:
+                shutil.rmtree(target, ignore_errors=True)
+            except OSError as e:
+                # 只兜住异常，避免整个连接被 handle() 静默吞掉；删除语义与原来保持一致
+                failed = e
+            if failed:
+                audit_log.error("delete failed user=%s ip=%s %s=%s error=%s", username,
+                                self.get_client_ip(), kind, one_line(target), one_line(failed))
+            else:
+                audit_log.warning("delete user=%s ip=%s %s=%s", username, self.get_client_ip(),
+                                  kind, one_line(target.replace(STORAGE_DIR, "storage")))
         else:
             audit_log.warning("delete missed user=%s ip=%s name=%s",
                               username, self.get_client_ip(), one_line(name))
@@ -983,7 +990,14 @@ class NASHandler(BaseHTTPRequestHandler):
         if folder_name and not "/" in folder_name and not "\\" in folder_name:
             target = safe_path(current_path + "/" + folder_name if current_path else folder_name)
             if target:
-                os.makedirs(target, exist_ok=True)
+                try:
+                    os.makedirs(target, exist_ok=True)
+                except OSError as e:
+                    # Windows 等平台的非法字符（<>:"|?*）会在这里失败，必须给明确响应而不是断连
+                    audit_log.warning("mkdir failed user=%s name=%s error=%s",
+                                      username, one_line(folder_name), one_line(e))
+                    self.send_text("文件夹名称无效或无法创建", 400)
+                    return
                 audit_log.info("mkdir user=%s ip=%s path=%s", username, self.get_client_ip(),
                                one_line(os.path.relpath(target, STORAGE_DIR).replace("\\", "/")))
 
