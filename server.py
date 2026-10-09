@@ -93,10 +93,11 @@ def parse_multipart_streaming(limited_reader, boundary, target_dir):
     initial = b'--' + boundary.encode() + b'\r\n'
     got = read_bytes(len(initial))
     if got != initial:
-        return [], []
+        return [], [], []
 
     files = []
     renamed = []
+    truncated = []
 
     while True:
         header_data = read_until(b'\r\n\r\n')
@@ -156,8 +157,9 @@ def parse_multipart_streaming(limited_reader, boundary, target_dir):
         if renamed_name:
             renamed.append(f"{full_name} → {'/'.join(safe_parts[:-1] + [renamed_name])}")
         total = 0
-
-        with open(target_file, 'wb') as f:
+        f = open(target_file, 'wb')
+        completed = False
+        try:
             while True:
                 pos = buf.find(delimiter)
                 if pos >= 0:
@@ -167,6 +169,7 @@ def parse_multipart_streaming(limited_reader, boundary, target_dir):
                     f.write(data)
                     total += len(data)
                     buf = buf[pos + delim_len:]
+                    completed = True
                     break
 
                 write_up_to = max(0, len(buf) - delim_len)
@@ -177,14 +180,19 @@ def parse_multipart_streaming(limited_reader, boundary, target_dir):
 
                 chunk = limited_reader.read(CHUNK_SIZE)
                 if not chunk:
-                    data = buf
-                    if data.endswith(b'\r\n'):
-                        data = data[:-2]
-                    f.write(data)
-                    total += len(data)
-                    buf = b''
                     break
                 buf += chunk
+        finally:
+            f.close()
+            if not completed:
+                try:
+                    os.remove(target_file)
+                except OSError:
+                    pass
+                truncated.append(full_name)
+
+        if not completed:
+            break
 
         files.append(full_name)
 
@@ -193,7 +201,7 @@ def parse_multipart_streaming(limited_reader, boundary, target_dir):
             read_bytes(2)
             break
 
-    return files, renamed
+    return files, renamed, truncated
 
 
 HOST = "0.0.0.0"
@@ -742,7 +750,10 @@ class NASHandler(BaseHTTPRequestHandler):
 
         try:
             limited = LengthLimitedReader(self.rfile, content_length)
-            files, renamed = parse_multipart_streaming(limited, boundary, target_dir)
+            files, renamed, truncated = parse_multipart_streaming(limited, boundary, target_dir)
+            if truncated:
+                self.send_text("上传中断，已丢弃不完整文件：" + "；".join(truncated), 400)
+                return
             if not files:
                 self.send_text("No file", 400)
                 return
