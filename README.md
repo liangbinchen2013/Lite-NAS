@@ -22,7 +22,7 @@
 
 ### 1. 配置用户
 
-**交互式配置：**
+**交互式配置（推荐）：**
 
 ```bash
 python setup.py
@@ -30,7 +30,7 @@ python setup.py
 
 按提示输入：
 - 用户名
-- 密码（需确认）
+- 密码（不回显，需确认）
 - NAS 名称，默认 Lite-NAS
 - 登录限流间隔（秒），默认 60
 - 调试模式（允许 127.0.0.1 登录），默认关闭
@@ -38,13 +38,13 @@ python setup.py
 **命令行参数配置：**
 
 ```bash
-python setup.py --username admin --password 123456 --nas-name "我的云盘"
+python setup.py --username admin --nas-name "我的云盘"
 ```
 
 | 参数 | 简写 | 说明 | 示例 |
 |------|------|------|------|
 | `--username` | `-u` | 登录用户名 | `--username admin` |
-| `--password` | `-p` | 登录密码 | `--password 123456` |
+| `--password` | `-p` | 登录密码（见下方提示） | `--password 123456` |
 | `--nas-name` | `-n` | NAS 显示名称 | `--nas-name "我的云盘"` |
 | `--rate-limit` | `-r` | 登录限流间隔（秒） | `--rate-limit 120` |
 | `--debug` | `-d` | 启用调试模式 | `--debug` |
@@ -52,7 +52,11 @@ python setup.py --username admin --password 123456 --nas-name "我的云盘"
 
 可混合使用命令行参数，未指定的参数保留原值或使用默认值。
 
-自动生成 `config.json`。
+> **提示**：`-p/--password` 会把明文口令留在 shell 历史和进程列表里，同机其他用户可能读到。
+> 只改口令时优先用交互式；确需用 `-p` 时，在不共享账号的机器上执行，或改完立刻用
+> `python setup.py` 重设一次。
+
+生成 `config.json`（写入脚本所在目录，权限尝试收紧为 600）。
 
 ### 2. 启动服务
 

@@ -1,17 +1,6 @@
-import json
 import getpass
 import argparse
-from server import hash_password
-
-CONFIG_FILE = "config.json"
-
-
-def load_config():
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+from server import hash_password, load_config, save_config
 
 
 def setup_interactive():
@@ -64,8 +53,7 @@ def setup_interactive():
         "debug": debug
     }
 
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    save_config(config)
 
     print(f"\n配置完成！用户: {username}")
     print(f"NAS名称: {nas_name}")
@@ -108,8 +96,7 @@ def setup_command_line(args):
     if "debug" not in config:
         config["debug"] = False
 
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+    save_config(config)
 
     print(f"配置已更新！用户: {config['username']}")
     print(f"NAS名称: {config['nas_name']}")
