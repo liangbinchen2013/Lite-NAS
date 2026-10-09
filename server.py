@@ -46,6 +46,19 @@ class LengthLimitedReader:
         return chunk
 
 
+def unique_path(path):
+    if not os.path.exists(path):
+        return path, None
+    directory, base = os.path.split(path)
+    stem, ext = os.path.splitext(base)
+    counter = 1
+    while True:
+        candidate = os.path.join(directory, f"{stem} ({counter}){ext}" if ext else f"{stem} ({counter})")
+        if not os.path.exists(candidate):
+            return candidate, os.path.basename(candidate)
+        counter += 1
+
+
 def parse_multipart_streaming(limited_reader, boundary, target_dir):
     delimiter = b'\r\n--' + boundary.encode()
     delim_len = len(delimiter)
@@ -80,9 +93,10 @@ def parse_multipart_streaming(limited_reader, boundary, target_dir):
     initial = b'--' + boundary.encode() + b'\r\n'
     got = read_bytes(len(initial))
     if got != initial:
-        return []
+        return [], []
 
     files = []
+    renamed = []
 
     while True:
         header_data = read_until(b'\r\n\r\n')
@@ -138,6 +152,9 @@ def parse_multipart_streaming(limited_reader, boundary, target_dir):
 
         target_file = os.path.join(target_dir, *safe_parts)
         os.makedirs(os.path.dirname(target_file), exist_ok=True)
+        target_file, renamed_name = unique_path(target_file)
+        if renamed_name:
+            renamed.append(f"{full_name} → {'/'.join(safe_parts[:-1] + [renamed_name])}")
         total = 0
 
         with open(target_file, 'wb') as f:
@@ -171,13 +188,12 @@ def parse_multipart_streaming(limited_reader, boundary, target_dir):
 
         files.append(full_name)
 
-
         next_2 = read_bytes(2)
         if next_2 == b'--':
             read_bytes(2)
             break
 
-    return files
+    return files, renamed
 
 
 HOST = "0.0.0.0"
@@ -726,11 +742,14 @@ class NASHandler(BaseHTTPRequestHandler):
 
         try:
             limited = LengthLimitedReader(self.rfile, content_length)
-            files = parse_multipart_streaming(limited, boundary, target_dir)
+            files, renamed = parse_multipart_streaming(limited, boundary, target_dir)
             if not files:
                 self.send_text("No file", 400)
                 return
-            self.send_text("OK")
+            if renamed:
+                self.send_text("OK\n已有同名文件，已重命名：" + "；".join(renamed))
+            else:
+                self.send_text("OK")
         except Exception:
             self.send_text("Upload error", 500)
 

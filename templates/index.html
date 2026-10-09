@@ -321,12 +321,13 @@ function uploadFiles(fileList) {
     speedEl.textContent = '';
     if (xhr.status === 200) {
       const resp = xhr.responseText;
-      if (resp && resp !== 'OK') {
-        showToast(resp, 'error');
+      if (resp.indexOf('OK') === 0) {
+        const detail = resp.slice(3).trim();
+        showToast(detail || '全部上传完成', 'success');
+        setTimeout(() => location.reload(), detail ? 4000 : 300);
       } else {
-        showToast('全部上传完成', 'success');
+        showToast(resp || '上传失败', 'error');
       }
-      setTimeout(() => location.reload(), 300);
     } else {
       showToast('上传失败: ' + xhr.responseText, 'error');
     }
