@@ -61,6 +61,9 @@ input[type="file"] { display: none; }
 .progress-speed { color: #10b981; font-weight: 500; }
 .progress-eta { color: #10b981; font-weight: 500; }
 .progress-percent { font-weight: 600; color: #3b82f6; }
+.progress-count { color: #666; }
+.ctrl-btn { padding: 2px 10px; border: 1px solid #ddd; border-radius: 3px; background: #fff; cursor: pointer; font-size: 12px; color: #444; }
+.ctrl-btn:hover { border-color: #999; background: #f5f5f5; }
 .toast { position: fixed; top: 20px; right: 20px; padding: 10px 16px; border-radius: 6px; font-size: 13px; z-index: 1000; opacity: 0; transform: translateY(-10px); transition: all 0.3s; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
 .toast.show { opacity: 1; transform: translateY(0); }
 .toast.success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
@@ -139,6 +142,12 @@ input[type="file"] { display: none; }
           <span id="progressSpeed"></span>
           <span class="progress-eta" id="progressEta"></span>
           <span class="progress-percent" id="progressPercent">0%</span>
+          <span class="progress-count" id="progressCount"></span>
+          <span id="progressControls" style="display:none">
+            <button type="button" class="ctrl-btn" id="btnPause" onclick="pauseUpload()">暂停</button>
+            <button type="button" class="ctrl-btn" id="btnResume" onclick="resumeUpload()" style="display:none">继续</button>
+            <button type="button" class="ctrl-btn" onclick="cancelUpload()">取消</button>
+          </span>
         </div>
       </div>
     </div>
@@ -267,80 +276,142 @@ function createFolder() {
   form.submit();
 }
 
+const countEl = document.getElementById('progressCount');
+const controlsEl = document.getElementById('progressControls');
+const btnPause = document.getElementById('btnPause');
+const btnResume = document.getElementById('btnResume');
+
+const upload = { files: [], i: 0, sent: 0, total: 0, xhr: null, paused: false,
+                 cancelled: false, renamed: [], failed: null, startedAt: 0, pausedAt: 0 };
+
+function relPathOf(f) {
+  return f._relativePath || f.webkitRelativePath || f.name;
+}
+
+function paint(loaded) {
+  const doneBytes = upload.sent + loaded;
+  const pct = upload.total > 0 ? doneBytes / upload.total * 100 : 100;
+  const elapsed = (Date.now() - upload.startedAt) / 1000;
+  const speed = elapsed > 0 ? doneBytes / elapsed : 0;
+  fill.style.width = pct.toFixed(1) + '%';
+  sizeEl.textContent = formatBytes(doneBytes) + ' / ' + formatBytes(upload.total);
+  percentEl.textContent = pct.toFixed(1) + '%';
+  countEl.textContent = Math.min(upload.i + 1, upload.files.length) + ' / ' + upload.files.length + ' 个文件';
+  speedEl.textContent = elapsed > 0.5 ? formatSpeed(speed) : '';
+  etaEl.textContent = elapsed > 1 && speed > 0 ? formatEta((upload.total - doneBytes) / speed) : '';
+}
+
 function uploadFiles(fileList) {
-  if (fileList.length === 0) return;
-
   const files = Array.from(fileList);
-  const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
-
+  if (files.length === 0) return;
+  if (upload.xhr) { showToast('已有上传在进行，请稍候', 'error'); return; }
+  upload.files = files;
+  upload.i = 0; upload.sent = 0; upload.total = files.reduce((s, f) => s + f.size, 0);
+  upload.paused = false; upload.cancelled = false; upload.renamed = []; upload.failed = null;
+  upload.startedAt = Date.now();
   bar.style.display = 'block';
-  fill.style.width = '0%';
-  sizeEl.textContent = '0 / ' + formatBytes(totalBytes);
-  etaEl.textContent = '';
-  percentEl.textContent = '0.0%';
-  speedEl.textContent = '';
-  setScrolling(true);
+  controlsEl.style.display = 'inline';
+  btnPause.style.display = '';
+  btnResume.style.display = 'none';
+  setScrolling(false);
+  paint(0);
+  pump();
+}
 
+function pump() {
+  if (upload.paused || upload.cancelled || upload.failed) return finishQueue();
+  if (upload.i >= upload.files.length) return finishQueue();
+
+  const f = upload.files[upload.i];
+  const name = relPathOf(f);
   const fd = new FormData();
-  for (const f of files) {
-    let path;
-    if (f._relativePath) {
-      path = f._relativePath;
-    } else if (f.webkitRelativePath) {
-      path = f.webkitRelativePath;
-    } else {
-      path = f.name;
-    }
-    fd.append('file', f, path);
-  }
+  fd.append('file', f, name);
 
   const xhr = new XMLHttpRequest();
-  const startTime = Date.now();
-
-  xhr.upload.onprogress = e => {
-    if (e.lengthComputable) {
-      const elapsed = (Date.now() - startTime) / 1000;
-      const speed = elapsed > 0 ? e.loaded / elapsed : 0;
-      const percent = (e.loaded / e.total * 100).toFixed(1);
-      const remaining = e.total - e.loaded;
-      const eta = speed > 0 ? remaining / speed : 0;
-      fill.style.width = percent + '%';
-      sizeEl.textContent = formatBytes(e.loaded) + ' / ' + formatBytes(e.total);
-      etaEl.textContent = elapsed > 1 ? formatEta(eta) : '';
-      percentEl.textContent = percent + '%';
-      speedEl.textContent = formatSpeed(speed);
-    }
-  };
-
+  upload.xhr = xhr;
+  xhr.upload.onprogress = e => { if (e.lengthComputable) paint(e.loaded); };
   xhr.onload = () => {
-    setScrolling(false);
-    fill.style.width = '100%';
-    sizeEl.textContent = formatBytes(totalBytes) + ' / ' + formatBytes(totalBytes);
-    etaEl.textContent = '';
-    percentEl.textContent = '100.0%';
-    speedEl.textContent = '';
-    if (xhr.status === 200) {
-      const resp = xhr.responseText;
-      if (resp.indexOf('OK') === 0) {
-        const detail = resp.slice(3).trim();
-        showToast(detail || '全部上传完成', 'success');
-        setTimeout(() => location.reload(), detail ? 4000 : 300);
-      } else {
-        showToast(resp || '上传失败', 'error');
-      }
+    if (upload.xhr !== xhr) return;
+    upload.xhr = null;
+    const resp = xhr.responseText || '';
+    if (xhr.status === 200 && resp.indexOf('OK') === 0) {
+      const detail = resp.slice(3).trim();
+      if (detail) upload.renamed.push(detail.replace(/^已有同名文件，已重命名：/, ''));
+      upload.sent += f.size;
+      upload.i += 1;
+      pump();
     } else {
-      showToast('上传失败: ' + xhr.responseText, 'error');
+      upload.failed = name + '：' + (resp || ('HTTP ' + xhr.status));
+      finishQueue();
     }
   };
-
   xhr.onerror = () => {
-    setScrolling(false);
-    showToast('上传出错', 'error');
+    if (upload.xhr !== xhr) return;
+    upload.xhr = null;
+    if (upload.paused || upload.cancelled) return finishQueue();
+    upload.failed = name + '：网络错误';
+    finishQueue();
   };
-
+  xhr.onabort = () => { if (upload.xhr === xhr) { upload.xhr = null; finishQueue(); } };
   xhr.open('POST', '/upload');
   xhr.setRequestHeader('X-Current-Path', currentPath);
   xhr.send(fd);
+}
+
+function finishQueue() {
+  if (upload.paused && !upload.cancelled) {
+    speedEl.textContent = '';
+    etaEl.textContent = '';
+    countEl.textContent = upload.i + ' / ' + upload.files.length + ' 个已完成';
+    showToast('已暂停，已上传的文件保留；继续时正在传的文件会重新上传', 'success');
+    return;  // 按钮要留着，用户得能点“继续”
+  }
+  controlsEl.style.display = 'none';
+  if (upload.failed) {
+    fill.style.width = '0%';
+    showToast('上传中断：' + upload.failed + '（已上传的文件保留）', 'error');
+    setTimeout(() => location.reload(), 2500);
+    return;
+  }
+  if (upload.cancelled) {
+    showToast('已取消，已上传的文件保留', 'success');
+    setTimeout(() => location.reload(), 400);
+    return;
+  }
+  fill.style.width = '100%';
+  percentEl.textContent = '100.0%';
+  speedEl.textContent = '';
+  etaEl.textContent = '';
+  const note = upload.renamed.length ? '部分同名文件已重命名：' + upload.renamed.join('；') : '全部上传完成';
+  showToast(note, 'success');
+  setTimeout(() => location.reload(), upload.renamed.length ? 4000 : 300);
+}
+
+function pauseUpload() {
+  if (!upload.xhr && upload.paused) return;
+  upload.paused = true;
+  upload.pausedAt = Date.now();
+  btnPause.style.display = 'none';
+  btnResume.style.display = '';
+  if (upload.xhr) upload.xhr.abort();
+  else finishQueue();
+}
+
+function resumeUpload() {
+  if (!upload.paused || upload.cancelled) return;
+  upload.paused = false;
+  btnPause.style.display = '';
+  btnResume.style.display = 'none';
+  upload.startedAt += Date.now() - upload.pausedAt;  // 暂停这段时间不计入平均速度
+  paint(0);
+  pump();
+}
+
+function cancelUpload() {
+  upload.cancelled = true;
+  upload.paused = false;
+  if (upload.xhr) upload.xhr.abort();
+  else finishQueue();
 }
 
 input.addEventListener('change', () => { uploadFiles(input.files); input.value = ''; });
