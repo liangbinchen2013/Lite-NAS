@@ -33,10 +33,36 @@ def read_form_body(handler):
     return handler.rfile.read(int(length)).decode("utf-8", errors="replace")
 
 
+class Pacer:
+    """按累计字节数控制发送/接收节奏（漏桶式），0 表示不限速。"""
+
+    def __init__(self, kbytes_per_sec):
+        self.rate = kbytes_per_sec * 1024 if kbytes_per_sec and kbytes_per_sec > 0 else 0
+        self._start = time.monotonic()
+        self._done = 0
+
+    def throttle(self, nbytes):
+        if not self.rate or nbytes <= 0:
+            return
+        self._done += nbytes
+        delay = self._start + self._done / self.rate - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+
+
+def get_limits():
+    config = load_config()
+    def positive(key):
+        value = config.get(key, 0)
+        return value if isinstance(value, int) and value > 0 else 0
+    return positive("upload_limit_kb"), positive("download_limit_kb")
+
+
 class LengthLimitedReader:
-    def __init__(self, rfile, limit):
+    def __init__(self, rfile, limit, pacer=None):
         self._rfile = rfile
         self._remaining = limit
+        self._pacer = pacer
 
     def read(self, n=-1):
         if self._remaining <= 0:
@@ -45,6 +71,9 @@ class LengthLimitedReader:
         to_read = min(to_read, self._remaining)
         chunk = self._rfile.read(to_read)
         self._remaining -= len(chunk)
+        # 读得慢就会让 TCP 窗口收住，客户端上行被自然限速，无需浏览器配合
+        if self._pacer:
+            self._pacer.throttle(len(chunk))
         return chunk
 
 
@@ -853,7 +882,8 @@ class NASHandler(BaseHTTPRequestHandler):
             return
         try:
             os.makedirs(target_dir, exist_ok=True)
-            limited = LengthLimitedReader(self.rfile, content_length)
+            upload_limit_kb, _ = get_limits()
+            limited = LengthLimitedReader(self.rfile, content_length, Pacer(upload_limit_kb))
             files, renamed, truncated = parse_multipart_streaming(limited, boundary, target_dir)
             client_ip = self.get_client_ip()
             if truncated:
@@ -903,17 +933,23 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(os.path.getsize(filepath)))
             self.end_headers()
 
-            with open(filepath, "rb") as f:
-                while True:
-                    chunk = f.read(65536)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
+            self.send_file_stream(filepath)
         except (ConnectionAbortedError, BrokenPipeError):
             pass
         except Exception as e:
             print(f"Download error: {e}")
+
+    def send_file_stream(self, path):
+        _, download_limit_kb = get_limits()
+        pacer = Pacer(download_limit_kb)
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+                pacer.throttle(len(chunk))
 
     def handle_delete(self):
         valid, username = self.is_authenticated()
@@ -1108,13 +1144,7 @@ class NASHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(file_size))
             self.end_headers()
 
-            with open(out_path, "rb") as f:
-                while True:
-                    chunk = f.read(65536)
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
+            self.send_file_stream(out_path)
         except (ConnectionAbortedError, BrokenPipeError):
             pass
         except Exception as e:
