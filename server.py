@@ -1436,11 +1436,28 @@ def sweep_zip_tasks_dir():
             remove_quietly(path)
 
 
+def port_in_use():
+    # Windows 上 SO_REUSEADDR 允许多个进程同时绑同一端口，请求被随机分摊到不同实例，
+    # 表现为“刚登录就又说没登录”。启动前先探一次，宁可拒绝启动。
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.settimeout(1)
+    try:
+        probe.connect(("127.0.0.1", PORT))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
 def main():
     try:
         setup_audit_log()
     except OSError as e:
         print(f"审计日志不可写（{e}），仅本次进程不记录")
+    if port_in_use():
+        print(f"端口 {PORT} 已有服务在监听，请先停止旧实例再启动")
+        return
     os.makedirs(STORAGE_DIR, exist_ok=True)
     sweep_zip_tasks_dir()
     threading.Thread(target=state_janitor, daemon=True).start()
