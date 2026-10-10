@@ -3,44 +3,54 @@ import argparse
 from server import hash_password, load_config, save_config
 
 
+def ask_username():
+    while True:
+        username = input("用户名: ").strip()
+        if username:
+            return username
+        print("用户名不能为空，请重新输入")
+
+
+def ask_password():
+    while True:
+        password = getpass.getpass("密码: ")
+        if not password:
+            print("密码不能为空，请重新输入")
+            continue
+        if password != getpass.getpass("确认密码: "):
+            print("两次密码不一致，请重新设置密码")
+            continue
+        return password
+
+
+def ask_interval(default_interval):
+    while True:
+        value = input(f"登录限流间隔(秒) [默认{default_interval}]: ").strip()
+        if not value:
+            return default_interval
+        try:
+            interval = int(value)
+        except ValueError:
+            print("请输入有效数字，例如 60")
+            continue
+        if interval < 0:
+            print("间隔不能为负数，请重新输入")
+            continue
+        return interval
+
+
 def setup_interactive():
     print("=== Lite-NAS 用户配置 ===\n")
 
     old_config = load_config()
 
-    username = input("用户名: ").strip()
-    if not username:
-        print("用户名不能为空")
-        return
-
-    password = getpass.getpass("密码: ")
-    if not password:
-        print("密码不能为空")
-        return
-
-    confirm = getpass.getpass("确认密码: ")
-    if password != confirm:
-        print("两次密码不一致")
-        return
+    username = ask_username()
+    password = ask_password()
 
     default_nas_name = old_config.get("nas_name", "Lite-NAS")
-    nas_name = input(f"NAS名称 [默认{default_nas_name}]: ").strip()
-    if not nas_name:
-        nas_name = default_nas_name
+    nas_name = input(f"NAS名称 [默认{default_nas_name}]: ").strip() or default_nas_name
 
-    default_interval = old_config.get("rate_limit_interval", 60)
-    interval_input = input(f"登录限流间隔(秒) [默认{default_interval}]: ").strip()
-    if interval_input:
-        try:
-            rate_limit_interval = int(interval_input)
-            if rate_limit_interval < 0:
-                print("间隔不能为负数")
-                return
-        except ValueError:
-            print("请输入有效数字")
-            return
-    else:
-        rate_limit_interval = default_interval
+    rate_limit_interval = ask_interval(old_config.get("rate_limit_interval", 60))
 
     config = {
         "username": username,
