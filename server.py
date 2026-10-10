@@ -10,6 +10,7 @@ import logging
 import zipfile
 import tarfile
 import io
+import socket
 import ipaddress
 import threading
 import uuid
@@ -273,7 +274,8 @@ ZIP_TASK_TTL = 600
 MAX_ZIP_TASKS = 4
 
 
-DEFAULT_CONFIG = {"username": "", "password": "", "nas_name": "Lite-NAS"}
+DEFAULT_CONFIG = {"username": "", "password": "", "nas_name": "Lite-NAS",
+                  "rate_limit_interval": 60, "upload_limit_kb": 0, "download_limit_kb": 0}
 
 
 def load_config():
@@ -426,6 +428,23 @@ def render_login_page(error=None):
     html = load_template("login").replace("{{nas_name}}", nas_name)
     if error:
         html = html.replace("</form>", f'<p class="error">{error}</p></form>')
+    return html
+
+
+def render_settings_page(message=None, ok=True):
+    config = load_config()
+    values = {
+        "{{nas_name}}": esc(config.get("nas_name", "Lite-NAS")),
+        "{{username}}": esc(config.get("username", "")),
+        "{{rate_limit_interval}}": esc(config.get("rate_limit_interval", 60)),
+        "{{upload_limit_kb}}": esc(config.get("upload_limit_kb", 0)),
+        "{{download_limit_kb}}": esc(config.get("download_limit_kb", 0)),
+        "{{message}}": esc(message or ""),
+        "{{message_class}}": ("ok" if ok else "err") if message else "",
+    }
+    html = load_template("settings")
+    for key, value in values.items():
+        html = html.replace(key, value)
     return html
 
 
@@ -852,6 +871,100 @@ class NASHandler(BaseHTTPRequestHandler):
             audit_log.warning("login failed user=%s ip=%s", one_line(username), client_ip)
             self.send_html(render_login_page("用户名或密码错误"), 401)
 
+    def reject_settings(self, message, status):
+        self.send_html(render_settings_page(message, ok=False), status)
+
+    def handle_settings(self):
+        valid, username = self.is_authenticated()
+        if not valid:
+            self.send_redirect("/login")
+            return
+
+        body = read_form_body(self)
+        if body is None:
+            self.send_text("Bad request", 400)
+            return
+        params = parse_qs(body, keep_blank_values=True)
+        config = load_config()
+
+        current_password = params.get("current_password", [""])[0]
+        if not verify_password(current_password, config.get("password", "")):
+            audit_log.warning("settings rejected, wrong current password user=%s ip=%s",
+                              username, self.get_client_ip())
+            self.reject_settings("当前密码不正确，未做任何修改", 403)
+            return
+
+        def text(key, default=""):
+            return params.get(key, [default])[0].strip()
+
+        def number(key, default, maximum, label):
+            raw = text(key, str(default))
+            if not raw:
+                return default, None
+            try:
+                value = int(raw)
+            except ValueError:
+                return None, f"{label}需要是整数"
+            if value < 0 or value > maximum:
+                return None, f"{label}需在 0 到 {maximum} 之间"
+            return value, None
+
+        nas_name = text("nas_name") or "Lite-NAS"
+        new_username = text("username")
+        if not new_username:
+            self.reject_settings("用户名不能为空", 400)
+            return
+
+        new_password = params.get("password", [""])[0]
+        if new_password and new_password != params.get("password_confirm", [""])[0]:
+            self.reject_settings("两次输入的新密码不一致", 400)
+            return
+
+        rate_limit, err = number("rate_limit_interval", config.get("rate_limit_interval", 60),
+                                 86400, "限流间隔")
+        if err:
+            self.reject_settings(err, 400)
+            return
+        upload_limit, err = number("upload_limit_kb", config.get("upload_limit_kb", 0),
+                                   1048576, "上传限速")
+        if err:
+            self.reject_settings(err, 400)
+            return
+        download_limit, err = number("download_limit_kb", config.get("download_limit_kb", 0),
+                                     1048576, "下载限速")
+        if err:
+            self.reject_settings(err, 400)
+            return
+
+        changed = []
+        for key, value in (("nas_name", nas_name), ("username", new_username),
+                           ("rate_limit_interval", rate_limit),
+                           ("upload_limit_kb", upload_limit), ("download_limit_kb", download_limit)):
+            if config.get(key) != value:
+                config[key] = value
+                changed.append(key)
+        if new_password:
+            config["password"] = hash_password(new_password)
+            changed.append("password")
+
+        if not changed:
+            self.send_html(render_settings_page("没有发现改动"))
+            return
+
+        save_config(config)
+        if "password" in changed or "username" in changed:
+            current_token = self.get_cookie("session")
+            for token in [t for t in sessions if t != current_token]:
+                sessions.pop(token, None)
+            if current_token in sessions:
+                sessions[current_token]["username"] = new_username
+        audit_log.info("settings updated user=%s ip=%s changed=%s",
+                       username, self.get_client_ip(), ",".join(changed))
+        labels = {"nas_name": "NAS 名称", "username": "用户名", "password": "密码",
+                  "rate_limit_interval": "限流间隔", "upload_limit_kb": "上传限速",
+                  "download_limit_kb": "下载限速"}
+        self.send_html(render_settings_page("已保存：" + "、".join(labels[c] for c in changed)))
+
     def handle_upload(self):
         valid, username = self.is_authenticated()
         if not valid:
@@ -1261,6 +1374,12 @@ class NASHandler(BaseHTTPRequestHandler):
                 self.send_redirect("/")
                 return
             self.send_html(render_login_page())
+        elif path == "/settings":
+            valid, username = self.is_authenticated()
+            if not valid:
+                self.send_redirect("/login")
+                return
+            self.send_html(render_settings_page())
         elif path == "/logout":
             token = self.get_cookie("session")
             valid, username = is_valid_session(token)
@@ -1292,6 +1411,8 @@ class NASHandler(BaseHTTPRequestHandler):
 
         if path == "/login":
             self.handle_login()
+        elif path == "/settings":
+            self.handle_settings()
         elif path == "/upload":
             self.handle_upload()
         elif path == "/delete":

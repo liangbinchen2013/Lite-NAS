@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{nas_name}} - 设置</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: "Segoe UI", "Microsoft YaHei", sans-serif; background: #f5f5f5; color: #333; min-height: 100vh; padding: 24px; }
+.wrap { max-width: 560px; margin: 0 auto; }
+head, .page-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.page-head h1 { font-size: 20px; }
+.links a { color: #666; text-decoration: none; font-size: 13px; margin-left: 14px; }
+.links a:hover { color: #3b82f6; }
+.card { background: #fff; border-radius: 8px; padding: 24px 28px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-bottom: 16px; }
+.card h2 { font-size: 14px; color: #555; margin-bottom: 14px; padding-bottom: 8px; border-bottom: 1px solid #f0f0f0; }
+.field { margin-bottom: 14px; }
+label { display: block; margin-bottom: 5px; font-size: 13px; color: #555; }
+input[type="text"], input[type="password"], input[type="number"] { width: 100%; padding: 9px 12px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; outline: none; }
+input:focus { border-color: #3b82f6; background: #fff; }
+.hint { color: #888; font-size: 12px; margin-top: 4px; }
+.row { display: flex; gap: 12px; }
+.row .field { flex: 1; }
+.msg { padding: 10px 14px; border-radius: 6px; font-size: 13px; margin-bottom: 16px; display: none; }
+.msg.ok { display: block; background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+.msg.err { display: block; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+button { padding: 10px 24px; background: #3b82f6; color: #fff; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; }
+button:hover { background: #2563eb; }
+.note { color: #999; font-size: 12px; margin-top: 12px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="page-head">
+    <h1>设置</h1>
+    <div class="links"><a href="/">返回文件</a><a href="/logout">退出登录</a></div>
+  </div>
+
+  <div class="msg {{message_class}}">{{message}}</div>
+
+  <form method="POST" action="/settings">
+    <div class="card">
+      <h2>账号与名称</h2>
+      <div class="field">
+        <label for="current_password">当前密码（任何修改都需要）</label>
+        <input type="password" id="current_password" name="current_password" autocomplete="current-password" required>
+      </div>
+      <div class="field">
+        <label for="nas_name">NAS 名称</label>
+        <input type="text" id="nas_name" name="nas_name" value="{{nas_name}}">
+      </div>
+      <div class="field">
+        <label for="username">用户名</label>
+        <input type="text" id="username" name="username" value="{{username}}">
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="password">新密码</label>
+          <input type="password" id="password" name="password" autocomplete="new-password" placeholder="留空则不修改">
+        </div>
+        <div class="field">
+          <label for="password_confirm">确认新密码</label>
+          <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password">
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>上传 / 下载</h2>
+      <div class="field">
+        <label for="rate_limit_interval">登录失败限流间隔（秒）</label>
+        <input type="number" id="rate_limit_interval" name="rate_limit_interval" min="0" max="86400" value="{{rate_limit_interval}}">
+        <div class="hint">0 表示不锁定，但失败仍会被记录到审计日志</div>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="upload_limit_kb">上传限速（KB/s）</label>
+          <input type="number" id="upload_limit_kb" name="upload_limit_kb" min="0" max="1048576" value="{{upload_limit_kb}}">
+        </div>
+        <div class="field">
+          <label for="download_limit_kb">下载限速（KB/s）</label>
+          <input type="number" id="download_limit_kb" name="download_limit_kb" min="0" max="1048576" value="{{download_limit_kb}}">
+        </div>
+      </div>
+      <div class="hint">0 或留空表示不限速。限速对每个连接独立生效，改动立即对新请求生效。</div>
+    </div>
+
+    <button type="submit">保存设置</button>
+    <div class="note">口令以 PBKDF2-SHA256 加随机盐存储；修改用户名或密码会让其他已登录会话立即失效。</div>
+  </form>
+</div>
+</body>
+</html>
