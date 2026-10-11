@@ -16,7 +16,8 @@ head, .page-head { display: flex; justify-content: space-between; align-items: c
 .card h2 { font-size: 14px; color: #555; margin-bottom: 14px; padding-bottom: 8px; border-bottom: 1px solid #f0f0f0; }
 .field { margin-bottom: 14px; }
 label { display: block; margin-bottom: 5px; font-size: 13px; color: #555; }
-input[type="text"], input[type="password"], input[type="number"] { width: 100%; padding: 9px 12px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; outline: none; }
+input[type="text"], input[type="password"], input[type="number"], select { width: 100%; padding: 9px 12px; background: #f9f9f9; border: 1px solid #ddd; border-radius: 5px; font-size: 14px; outline: none; }
+select { height: 38px; }
 input:focus { border-color: #3b82f6; background: #fff; }
 .hint { color: #888; font-size: 12px; margin-top: 4px; }
 .row { display: flex; gap: 12px; }
@@ -110,7 +111,7 @@ button.create:hover { background: #059669; }
         <input type="password" id="key_password" name="current_password" autocomplete="current-password" required>
       </div>
       <table class="keys">
-        <thead><tr><th>ID</th><th>名称</th><th>权限</th><th>本次启动后最近使用</th></tr></thead>
+        <thead><tr><th>ID</th><th>名称</th><th>权限</th><th>授权目录</th><th>本次启动后最近使用</th></tr></thead>
         <tbody>{{api_keys_rows}}</tbody>
       </table>
       <div class="field">
@@ -124,6 +125,11 @@ button.create:hover { background: #059669; }
           <label class="check"><input type="checkbox" name="key_scopes" value="write">写入（上传、建目录、移动）</label>
           <label class="check"><input type="checkbox" name="key_scopes" value="delete">删除</label>
         </div>
+      </div>
+      <div class="field">
+        <label for="key_root">授权目录</label>
+        <select id="key_root" name="key_root">{{api_root_options}}</select>
+        <div class="hint">密钥只能读写该目录以内的文件，路径也相对它解析：看不到上层，也无法越出。</div>
       </div>
       <button type="submit" name="do" value="create_key" class="create">创建密钥</button>
       <div class="note">密钥明文只在创建成功时显示一次，服务端只保存 SHA-256 摘要；吊销立即生效。请只给脚本所需的最小权限。</div>

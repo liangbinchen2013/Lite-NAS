@@ -359,10 +359,10 @@ def find_api_key(config, token):
     return None
 
 
-def create_api_key(name, scopes):
+def create_api_key(name, scopes, root=""):
     key_id = secrets.token_hex(4)
     secret = secrets.token_hex(32)
-    entry = {"id": key_id, "name": name, "scopes": list(scopes),
+    entry = {"id": key_id, "name": name, "scopes": list(scopes), "root": root,
              "secret_hash": api_secret_hash(secret), "created": int(time.time())}
     return entry, f"{API_TOKEN_PREFIX}_{key_id}_{secret}"
 
@@ -484,18 +484,36 @@ def render_login_page(error=None):
 def render_api_keys_rows(config):
     entries = [e for e in (config.get("api_keys") or []) if isinstance(e, dict)]
     if not entries:
-        return '<tr><td colspan="4" class="empty">还没有密钥</td></tr>'
+        return '<tr><td colspan="5" class="empty">还没有密钥</td></tr>'
     rows = ""
     for entry in entries:
         key_id = esc(entry.get("id", ""))
         name = esc(entry.get("name", ""))
         scopes = esc("、".join(usable_scopes(entry)) or "无")
+        root = esc(entry.get("root") or "整个存储")
         used = api_key_usage.get(entry.get("id"))
         used_text = time.strftime("%m-%d %H:%M", time.localtime(used)) if used else "-"
         rows += f"""
-      <tr><td class="mono">{key_id}</td><td>{name}</td><td>{scopes}</td>
+      <tr><td class="mono">{key_id}</td><td>{name}</td><td>{scopes}</td><td>{root}</td>
           <td>{used_text}<button type="submit" class="revoke" name="revoke_key" value="{key_id}">吊销</button></td></tr>"""
     return rows
+
+
+def render_api_key_root_options():
+    """授权目录下拉：服务端渲染全部子目录，避免前端脚本。"""
+    options = ['<option value="">整个存储</option>']
+    count = 0
+    for dirpath, dirnames, filenames in os.walk(STORAGE_DIR):
+        dirnames.sort()
+        for name in dirnames:
+            rel = rel_path(STORAGE_DIR, os.path.join(dirpath, name))
+            indent = "　" * rel.count("/")
+            options.append(f'<option value="{esc(rel)}">{indent}{esc(name)}</option>')
+            count += 1
+            if count >= 500:
+                options.append('<option value="">（目录过多，仅列出前 500 个）</option>')
+                return "".join(options)
+    return "".join(options)
 
 
 def render_settings_page(message=None, ok=True):
@@ -508,6 +526,7 @@ def render_settings_page(message=None, ok=True):
         "{{download_limit_kb}}": esc(config.get("download_limit_kb", 0)),
         "{{api_key_count}}": str(len([e for e in (config.get("api_keys") or []) if isinstance(e, dict)])),
         "{{api_keys_rows}}": render_api_keys_rows(config),
+        "{{api_root_options}}": render_api_key_root_options(),
         "{{message}}": esc(message or ""),
         "{{message_class}}": ("ok" if ok else "err") if message else "",
     }
@@ -528,7 +547,7 @@ def normalize_api_rel(rel):
     return "/".join(parts)
 
 
-def make_entry(fp):
+def make_entry(fp, root_abs=None):
     try:
         is_dir = os.path.isdir(fp)
         mtime = int(os.path.getmtime(fp))
@@ -536,7 +555,7 @@ def make_entry(fp):
     except OSError:
         return None
     name = os.path.basename(fp)
-    return {"name": name, "path": os.path.relpath(fp, STORAGE_DIR).replace("\\", "/"),
+    return {"name": name, "path": rel_path(root_abs or STORAGE_DIR, fp),
             "is_dir": is_dir, "size": size, "mtime": mtime,
             "type": "folder" if is_dir else get_file_ext_type(name)}
 
@@ -557,14 +576,14 @@ def storage_stats(root):
     return files, dirs, total
 
 
-def list_entries(base, recursive, limit, offset):
+def list_entries(base, recursive, limit, offset, root_abs=None):
     collected = []
     if recursive:
         for dirpath, dirnames, filenames in os.walk(base):
             dirnames.sort()
             filenames.sort()
             for name in dirnames + filenames:
-                entry = make_entry(os.path.join(dirpath, name))
+                entry = make_entry(os.path.join(dirpath, name), root_abs)
                 if entry:
                     collected.append(entry)
                 if len(collected) >= offset + limit:
@@ -577,22 +596,24 @@ def list_entries(base, recursive, limit, offset):
         except OSError:
             return [], False
         for name in names:
-            entry = make_entry(os.path.join(base, name))
+            entry = make_entry(os.path.join(base, name), root_abs)
             if entry:
                 collected.append(entry)
     return collected[offset:offset + limit], len(collected) >= offset + limit
 
 
-def move_entries(sources, target_rel):
+def move_entries(sources, target_rel, root_abs=None, strict=False):
     """把若干相对路径移动到目标目录；返回 (moved, skipped)，moved 为 None 表示目标非法。
-    同名不覆盖，按 Windows 风格改名。网页与 API 共用同一套规则。"""
-    target_abs = safe_path(target_rel)
-    if not target_abs or not os.path.isdir(target_abs):
+    同名不覆盖，按 Windows 风格改名。网页与 API 共用同一套规则；
+    API 传入 root_abs 时，源与目标都被限定在该授权目录内。"""
+    root_abs = root_abs or STORAGE_DIR
+    target_abs = safe_path(target_rel, root=root_abs, strict=strict)
+    if target_abs is None or not os.path.isdir(target_abs):
         return None, []
     moved = 0
     skipped = []
     for source in sources:
-        source_abs = safe_path(source)
+        source_abs = safe_path(source, root=root_abs, strict=strict)
         if not source_abs or not os.path.exists(source_abs):
             skipped.append({"path": source, "reason": "not_found"})
             continue
@@ -611,17 +632,46 @@ def move_entries(sources, target_rel):
     return moved, skipped
 
 
-def safe_path(rel_path):
-    rel_path = rel_path.strip("/")
-    if not rel_path:
-        return STORAGE_DIR
-    parts = [p for p in rel_path.split("/") if p and p != "." and p != ".."]
-    fp = os.path.join(STORAGE_DIR, *parts) if parts else STORAGE_DIR
-    real_storage = os.path.realpath(STORAGE_DIR)
+def safe_path(rel_path, root=None, strict=False):
+    """把相对路径解析到 root（默认整个 storage）内并做 realpath 约束。
+    strict=True 时含 . / .. 段直接拒绝（API 用）；网页端保持原来剥掉再解析的行为。"""
+    root = root or STORAGE_DIR
+    rel = str(rel_path).strip("/")
+    parts = []
+    for part in rel.split("/") if rel else []:
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if strict:
+                return None
+            continue
+        parts.append(part)
+    fp = os.path.join(root, *parts) if parts else root
+    real_root = os.path.realpath(root)
     real_fp = os.path.realpath(fp)
-    if real_fp != real_storage and not real_fp.startswith(real_storage + os.sep):
+    if real_fp != real_root and not real_fp.startswith(real_root + os.sep):
         return None
     return fp
+
+
+def api_path(root_abs, rel):
+    """API 路径解析：先做语法校验（拒绝 . 与 .. 段），再限定在该密钥的授权目录内。"""
+    rel = normalize_api_rel(rel)
+    if rel is None:
+        return None
+    return safe_path(rel, root=root_abs, strict=True)
+
+
+def rel_path(root_abs, fp):
+    return os.path.relpath(fp, root_abs).replace("\\", "/")
+
+
+def key_root(entry):
+    """密钥授权目录的绝对路径；目录被删除或改名后返回 None，调用方给明确的 root_missing。"""
+    root = safe_path((entry or {}).get("root") or "", strict=True)
+    if root is None or not os.path.isdir(root):
+        return None
+    return root
 
 
 def parse_ip(value):
@@ -1001,39 +1051,48 @@ class NASHandler(BaseHTTPRequestHandler):
         return bool(interval) and marked and time.time() - marked < interval
 
     def authenticate_api(self, scope):
-        """返回 (principal, error)。Authorization: Bearer <key> 优先，其次浏览器会话 Cookie。"""
+        """返回 (principal, root_abs, error)。Authorization: Bearer <key> 优先，其次浏览器会话 Cookie。
+        root_abs 是该凭证能看到的目录：会话为整个 storage，密钥为其授权的子目录。"""
         auth = self.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
             client_ip = self.get_client_ip()
             if self.api_fail_limited(client_ip):
-                return None, "rate_limited"
+                return None, None, "rate_limited"
             entry = find_api_key(load_config(), auth[len("Bearer "):].strip())
             if not entry:
                 api_failures[client_ip] = time.time()
                 audit_log.warning("api denied (unknown key) ip=%s prefix=%s",
                                   client_ip, one_line(auth[len("Bearer "):len('Bearer ') + 12]))
-                return None, "invalid_key"
+                return None, None, "invalid_key"
             if scope not in usable_scopes(entry):
                 audit_log.warning("api denied (scope=%s missing) key=%s ip=%s",
                                   scope, one_line(entry.get("name") or entry["id"]), client_ip)
-                return None, "insufficient_scope"
+                return None, None, "insufficient_scope"
+            root = key_root(entry)
+            if root is None:
+                audit_log.warning("api denied (授权目录已不存在) key=%s root=%s ip=%s",
+                                  one_line(entry.get("name") or entry["id"]),
+                                  one_line(entry.get("root") or "/"), client_ip)
+                return None, None, "root_missing"
             api_failures.pop(client_ip, None)
             api_key_usage[entry["id"]] = time.time()
-            return "key:" + str(entry.get("name") or entry["id"]), None
+            return "key:" + str(entry.get("name") or entry["id"]), root, None
         valid, username = self.is_authenticated()
         if valid:
-            return "session:" + str(username), None
-        return None, "unauthorized"
+            return "session:" + str(username), STORAGE_DIR, None
+        return None, None, "unauthorized"
 
     def reject_api(self, error):
         status = {"invalid_key": 401, "unauthorized": 401, "insufficient_scope": 403,
                   "rate_limited": 429, "not_found": 404, "invalid_path": 400,
-                  "bad_json": 400, "bad_request": 400}.get(error, 400)
+                  "bad_json": 400, "bad_request": 400, "root_missing": 403}.get(error, 400)
         message = {"invalid_key": "密钥无效或已被吊销", "unauthorized": "未登录且未提供 API 密钥",
                    "insufficient_scope": "该密钥缺少所需权限位", "rate_limited": "认证失败过于频繁，请稍后再试",
-                   "not_found": "路径不存在", "invalid_path": "路径非法：只接受 storage 内的相对路径，不得包含 . 或 .. 段",
+                   "not_found": "路径不存在",
+                   "invalid_path": "路径非法：只接受授权目录内的相对路径，不得包含 . 或 .. 段",
                    "bad_json": "请求体不是合法的 JSON 对象",
-                   "bad_request": "请求体过大或缺少合法 Content-Length"}.get(error, error)
+                   "bad_request": "请求体过大或缺少合法 Content-Length",
+                   "root_missing": "该密钥授权的目录已不存在或已被改名"}.get(error, error)
         self.send_json({"ok": False, "error": error, "message": message}, status)
 
     def get_client_ip(self):
@@ -1107,14 +1166,24 @@ class NASHandler(BaseHTTPRequestHandler):
             if not scopes:
                 self.reject_settings("至少要勾选一个权限位", 400)
                 return
-            entry, token = create_api_key(name, scopes)
+            rel_root = normalize_api_rel(params.get("key_root", [""])[0])
+            if rel_root is None:
+                self.reject_settings("授权目录路径非法", 400)
+                return
+            if rel_root:
+                abs_root = safe_path(rel_root)
+                if abs_root is None or not os.path.isdir(abs_root):
+                    self.reject_settings("授权目录不存在，请先建好或在上面选一个", 400)
+                    return
+            entry, token = create_api_key(name, scopes, rel_root)
             keys.append(entry)
             config["api_keys"] = keys
             save_config(config)
-            audit_log.info("api key created id=%s name=%s scopes=%s by=%s ip=%s",
-                           entry["id"], one_line(name), ",".join(scopes), username, client_ip)
+            audit_log.info("api key created id=%s name=%s scopes=%s root=%s by=%s ip=%s",
+                           entry["id"], one_line(name), ",".join(scopes), rel_root or "/",
+                           username, client_ip)
             self.send_html(render_settings_page(
-                "密钥已创建，明文只显示这一次，请立即保存：" + token))
+                f"密钥已创建（授权目录：{rel_root or '整个存储'}），明文只显示这一次，请立即保存：" + token))
             return
 
         keys = [e for e in (config.get("api_keys") or []) if isinstance(e, dict)]
@@ -1540,37 +1609,34 @@ class NASHandler(BaseHTTPRequestHandler):
             return None, f"{key} 需为 0 到 {maximum} 之间的整数"
         return int(raw), None
 
-    def resolve_api_path(self, params, key="path"):
-        rel = normalize_api_rel(unquote(self.param(params, key, "")))
-        if rel is None:
-            return None, None, "invalid_path"
-        fp = safe_path(rel)
+    def resolve_api_path(self, params, root_abs, key="path"):
+        fp = api_path(root_abs, unquote(self.param(params, key, "")))
         if fp is None:
             return None, None, "invalid_path"
         if not os.path.exists(fp):
             return None, None, "not_found"
-        return fp, rel, None
+        return fp, rel_path(root_abs, fp), None
 
     def handle_api_info(self):
-        principal, error = self.authenticate_api("read")
+        principal, root, error = self.authenticate_api("read")
         if not principal:
             self.reject_api(error)
             return
         params = self.api_query()
-        fp, rel, perr = self.resolve_api_path(params)
+        fp, rel, perr = self.resolve_api_path(params, root)
         if perr:
             self.reject_api(perr)
             return
-        files, dirs, used = storage_stats(fp if os.path.isdir(fp) else STORAGE_DIR)
+        files, dirs, used = storage_stats(fp if os.path.isdir(fp) else root)
         upload_limit_kb, download_limit_kb = get_limits()
-        is_root = os.path.realpath(fp) == os.path.realpath(STORAGE_DIR)
+        is_root = os.path.realpath(fp) == os.path.realpath(root)
         payload = {
             "ok": True,
             "nas_name": load_config().get("nas_name", "Lite-NAS"),
             "authenticated_as": principal.split(":", 1)[0],
-            "path": rel.strip("/"),
+            "path": rel.strip(".").strip("/"),
             "is_dir": os.path.isdir(fp),
-            "entry": None if is_root else make_entry(fp),
+            "entry": None if is_root else make_entry(fp, root),
             "root_files": files,
             "root_dirs": dirs,
             "used_bytes": used,
@@ -1581,7 +1647,7 @@ class NASHandler(BaseHTTPRequestHandler):
         self.send_json(payload)
 
     def handle_api_list(self):
-        principal, error = self.authenticate_api("read")
+        principal, root, error = self.authenticate_api("read")
         if not principal:
             self.reject_api(error)
             return
@@ -1596,27 +1662,27 @@ class NASHandler(BaseHTTPRequestHandler):
         if err:
             self.send_json({"ok": False, "error": "bad_request", "message": err}, 400)
             return
-        fp, rel, perr = self.resolve_api_path(params)
+        fp, rel, perr = self.resolve_api_path(params, root)
         if perr:
             self.reject_api(perr)
             return
         if not os.path.isdir(fp):
             self.send_json({"ok": False, "error": "not_a_folder", "message": "该路径不是目录"}, 400)
             return
-        entries, truncated = list_entries(fp, recursive, limit, offset)
+        entries, truncated = list_entries(fp, recursive, limit, offset, root)
         audit_log.info("api list as=%s path=%s recursive=%s n=%s",
                        principal, one_line(rel) or "/", recursive, len(entries))
-        self.send_json({"ok": True, "path": rel.strip("/"), "recursive": recursive,
+        self.send_json({"ok": True, "path": rel.strip(".").strip("/"), "recursive": recursive,
                         "count": len(entries), "truncated": truncated,
                         "offset": offset, "limit": limit, "entries": entries})
 
     def handle_api_download(self):
-        principal, error = self.authenticate_api("read")
+        principal, root, error = self.authenticate_api("read")
         if not principal:
             self.reject_api(error)
             return
         params = self.api_query()
-        fp, rel, perr = self.resolve_api_path(params)
+        fp, rel, perr = self.resolve_api_path(params, root)
         if perr:
             self.reject_api(perr)
             return
@@ -1652,21 +1718,18 @@ class NASHandler(BaseHTTPRequestHandler):
         return obj, None
 
     def handle_api_upload(self):
-        principal, error = self.authenticate_api("write")
+        principal, root, error = self.authenticate_api("write")
         if not principal:
             self.reject_api(error)
             return
         params = self.api_query()
-        rel_dir = normalize_api_rel(unquote(self.param(params, "path", "")))
-        if rel_dir is None:
-            self.reject_api("invalid_path")
-            return
+        rel_dir = unquote(self.param(params, "path", ""))
         name = unquote(self.param(params, "name", ""))
         if not name or name in (".", "..") or "/" in name or "\\" in name:
             self.send_json({"ok": False, "error": "invalid_name",
                             "message": "name 必须是无路径分隔符的文件名"}, 400)
             return
-        target_dir = safe_path(rel_dir)
+        target_dir = api_path(root, rel_dir)
         if target_dir is None:
             self.reject_api("invalid_path")
             return
@@ -1708,13 +1771,13 @@ class NASHandler(BaseHTTPRequestHandler):
                             "message": "写入失败（磁盘满、无权限或文件名在本机非法）"}, 500)
             return
 
-        rel_out = os.path.relpath(final, STORAGE_DIR).replace("\\", "/")
+        rel_out = rel_path(root, final)
         audit_log.info("api upload as=%s path=%s size=%s renamed=%s", principal, one_line(rel_out),
                        format_size(written), "yes" if renamed else "no")
         self.send_json({"ok": True, "path": rel_out, "size": written, "renamed": bool(renamed)}, 201)
 
     def handle_api_mkdir(self):
-        principal, error = self.authenticate_api("write")
+        principal, root, error = self.authenticate_api("write")
         if not principal:
             self.reject_api(error)
             return
@@ -1723,28 +1786,26 @@ class NASHandler(BaseHTTPRequestHandler):
             self.reject_api(jerr)
             return
         raw_path = str(body.get("path") or unquote(self.param(self.api_query(), "path", "")))
-        rel = normalize_api_rel(raw_path)
-        if rel is None:
-            self.reject_api("invalid_path")
+        if not normalize_api_rel(raw_path):
+            self.send_json({"ok": False, "error": "invalid_name",
+                            "message": "path 不能为空或越出授权目录"}, 400)
             return
-        if not rel:
-            self.send_json({"ok": False, "error": "invalid_name", "message": "path 不能为空（根目录已存在）"}, 400)
-            return
-        fp = safe_path(rel)
-        if fp is None:
+        fp = api_path(root, raw_path)
+        if fp is None or os.path.realpath(fp) == os.path.realpath(root):
             self.reject_api("invalid_path")
             return
         try:
             os.makedirs(fp, exist_ok=True)
         except OSError as e:
-            audit_log.error("api mkdir failed as=%s path=%s error=%s", principal, one_line(rel), one_line(e))
+            audit_log.error("api mkdir failed as=%s path=%s error=%s", principal, one_line(raw_path), one_line(e))
             self.send_json({"ok": False, "error": "write_failed", "message": "无法创建目录（名称非法或写入失败）"}, 500)
             return
+        rel = rel_path(root, fp)
         audit_log.info("api mkdir as=%s path=%s", principal, one_line(rel))
         self.send_json({"ok": True, "path": rel}, 201)
 
     def handle_api_move(self):
-        principal, error = self.authenticate_api("write")
+        principal, root, error = self.authenticate_api("write")
         if not principal:
             self.reject_api(error)
             return
@@ -1760,22 +1821,22 @@ class NASHandler(BaseHTTPRequestHandler):
             return
         sources = []
         for item in raw_sources:
-            rel = normalize_api_rel(str(item))
-            if rel is None or not rel:
+            resolved = api_path(root, str(item))
+            if resolved is None or not normalize_api_rel(str(item)):
                 self.reject_api("invalid_path")
                 return
-            sources.append(rel)
+            sources.append(rel_path(root, resolved))
         if "target_dir" not in body:
             self.send_json({"ok": False, "error": "missing_target",
                             "message": "缺少 target_dir（移到根目录请传空字符串）"}, 400)
             return
-        target_dir = normalize_api_rel(str(body.get("target_dir") or ""))
+        target_dir = api_path(root, str(body.get("target_dir") or ""))
         if target_dir is None:
             self.reject_api("invalid_path")
             return
-        moved, skipped = move_entries(sources, target_dir)
+        moved, skipped = move_entries(sources, rel_path(root, target_dir), root, strict=True)
         if moved is None:
-            self.send_json({"ok": False, "error": "not_found", "message": "目标目录不存在"}, 404)
+            self.send_json({"ok": False, "error": "not_found", "message": "目标目录不存在或越出授权目录"}, 404)
             return
         audit_log.info("api move as=%s to=%s moved=%d skipped=%d", principal,
                        target_dir or "/", moved, len(skipped))
@@ -1783,7 +1844,7 @@ class NASHandler(BaseHTTPRequestHandler):
                         "message": None if moved else "没有文件被移动"})
 
     def handle_api_delete(self):
-        principal, error = self.authenticate_api("delete")
+        principal, root, error = self.authenticate_api("delete")
         if not principal:
             self.reject_api(error)
             return
@@ -1791,20 +1852,18 @@ class NASHandler(BaseHTTPRequestHandler):
         if jerr:
             self.reject_api(jerr)
             return
-        rel = normalize_api_rel(str(body.get("path") or ""))
-        if rel is None:
-            self.reject_api("invalid_path")
-            return
-        fp = safe_path(rel)
+        fp = api_path(root, str(body.get("path") or ""))
         if fp is None:
             self.reject_api("invalid_path")
             return
-        if os.path.realpath(fp) == os.path.realpath(STORAGE_DIR):
-            self.send_json({"ok": False, "error": "forbidden_target", "message": "不允许删除存储根目录"}, 400)
+        if os.path.realpath(fp) == os.path.realpath(root):
+            self.send_json({"ok": False, "error": "forbidden_target",
+                            "message": "不允许删除授权根目录"}, 400)
             return
         if not os.path.exists(fp):
             self.reject_api("not_found")
             return
+        rel = rel_path(root, fp)
         is_dir = os.path.isdir(fp)
         try:
             if is_dir:
@@ -1815,21 +1874,19 @@ class NASHandler(BaseHTTPRequestHandler):
             audit_log.error("api delete failed as=%s path=%s error=%s", principal, one_line(rel), one_line(e))
             self.send_json({"ok": False, "error": "write_failed", "message": "删除失败（可能被占用或无权限）"}, 500)
             return
-        audit_log.warning("api delete as=%s %s=%s", principal, "dir" if is_dir else "file",
-                          one_line(os.path.relpath(fp, STORAGE_DIR).replace("\\", "/")))
-        self.send_json({"ok": True, "deleted": os.path.relpath(fp, STORAGE_DIR).replace("\\", "/"),
-                        "is_dir": is_dir})
+        audit_log.warning("api delete as=%s %s=%s", principal, "dir" if is_dir else "file", one_line(rel))
+        self.send_json({"ok": True, "deleted": rel, "is_dir": is_dir})
 
     def handle_api_folders(self):
-        principal, error = self.authenticate_api("read")
+        principal, root, error = self.authenticate_api("read")
         if not principal:
             self.reject_api(error)
             return
 
         folders = [""]
-        for dirpath, dirnames, filenames in os.walk(STORAGE_DIR):
+        for dirpath, dirnames, filenames in os.walk(root):
             dirnames.sort()
-            rel = os.path.relpath(dirpath, STORAGE_DIR)
+            rel = os.path.relpath(dirpath, root)
             if rel == ".":
                 continue
             folders.append(rel.replace("\\", "/"))
