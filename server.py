@@ -278,6 +278,8 @@ api_key_usage = {}
 API_TOKEN_PREFIX = "lnas"
 API_SCOPES = ("read", "write", "delete")
 MAX_API_KEYS = 20
+API_LIST_DEFAULT = 500
+API_LIST_MAX = 2000
 
 
 DEFAULT_CONFIG = {"username": "", "password": "", "nas_name": "Lite-NAS",
@@ -513,6 +515,61 @@ def render_settings_page(message=None, ok=True):
     for key, value in values.items():
         html = html.replace(key, value)
     return html
+
+
+def make_entry(fp):
+    try:
+        is_dir = os.path.isdir(fp)
+        mtime = int(os.path.getmtime(fp))
+        size = None if is_dir else os.path.getsize(fp)
+    except OSError:
+        return None
+    name = os.path.basename(fp)
+    return {"name": name, "path": os.path.relpath(fp, STORAGE_DIR).replace("\\", "/"),
+            "is_dir": is_dir, "size": size, "mtime": mtime,
+            "type": "folder" if is_dir else get_file_ext_type(name)}
+
+
+def storage_stats(root):
+    files = dirs = 0
+    total = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirs += len(dirnames)
+        files += len(filenames)
+        for f in filenames:
+            fp = os.path.join(dirpath, f)
+            try:
+                if os.path.isfile(fp):
+                    total += os.path.getsize(fp)
+            except OSError:
+                continue
+    return files, dirs, total
+
+
+def list_entries(base, recursive, limit, offset):
+    collected = []
+    if recursive:
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames.sort()
+            filenames.sort()
+            for name in dirnames + filenames:
+                entry = make_entry(os.path.join(dirpath, name))
+                if entry:
+                    collected.append(entry)
+                if len(collected) >= offset + limit:
+                    break
+            if len(collected) >= offset + limit:
+                break
+    else:
+        try:
+            names = sorted(os.listdir(base), key=lambda n: (not os.path.isdir(os.path.join(base, n)), n.lower()))
+        except OSError:
+            return [], False
+        for name in names:
+            entry = make_entry(os.path.join(base, name))
+            if entry:
+                collected.append(entry)
+    return collected[offset:offset + limit], len(collected) >= offset + limit
 
 
 def safe_path(rel_path):
@@ -931,9 +988,10 @@ class NASHandler(BaseHTTPRequestHandler):
 
     def reject_api(self, error):
         status = {"invalid_key": 401, "unauthorized": 401, "insufficient_scope": 403,
-                  "rate_limited": 429}.get(error, 400)
+                  "rate_limited": 429, "not_found": 404, "invalid_path": 400}.get(error, 400)
         message = {"invalid_key": "密钥无效或已被吊销", "unauthorized": "未登录且未提供 API 密钥",
-                   "insufficient_scope": "该密钥缺少所需权限位", "rate_limited": "认证失败过于频繁，请稍后再试"}.get(error, error)
+                   "insufficient_scope": "该密钥缺少所需权限位", "rate_limited": "认证失败过于频繁，请稍后再试",
+                   "not_found": "路径不存在", "invalid_path": "路径非法（越出存储根目录）"}.get(error, error)
         self.send_json({"ok": False, "error": error, "message": message}, status)
 
     def get_client_ip(self):
@@ -1426,6 +1484,115 @@ class NASHandler(BaseHTTPRequestHandler):
 
         zip_drop_task(task_id)
 
+    def api_query(self):
+        return parse_qs(urlparse(self.path).query, keep_blank_values=True)
+
+    def param(self, params, key, default=""):
+        return params.get(key, [default])[0]
+
+    def int_param(self, params, key, default, maximum):
+        raw = self.param(params, key, "").strip()
+        if not raw:
+            return default, None
+        if not raw.isdigit() or int(raw) > maximum:
+            return None, f"{key} 需为 0 到 {maximum} 之间的整数"
+        return int(raw), None
+
+    def resolve_api_path(self, params, key="path"):
+        rel = unquote(self.param(params, key, ""))
+        fp = safe_path(rel)
+        if fp is None:
+            return None, None, "invalid_path"
+        if not os.path.exists(fp):
+            return None, None, "not_found"
+        return fp, rel, None
+
+    def handle_api_info(self):
+        principal, error = self.authenticate_api("read")
+        if not principal:
+            self.reject_api(error)
+            return
+        params = self.api_query()
+        fp, rel, perr = self.resolve_api_path(params)
+        if perr:
+            self.reject_api(perr)
+            return
+        files, dirs, used = storage_stats(fp if os.path.isdir(fp) else STORAGE_DIR)
+        upload_limit_kb, download_limit_kb = get_limits()
+        is_root = os.path.realpath(fp) == os.path.realpath(STORAGE_DIR)
+        payload = {
+            "ok": True,
+            "nas_name": load_config().get("nas_name", "Lite-NAS"),
+            "authenticated_as": principal.split(":", 1)[0],
+            "path": rel.strip("/"),
+            "is_dir": os.path.isdir(fp),
+            "entry": None if is_root else make_entry(fp),
+            "root_files": files,
+            "root_dirs": dirs,
+            "used_bytes": used,
+            "used": format_size(used),
+            "limits": {"upload_kb": upload_limit_kb, "download_kb": download_limit_kb},
+        }
+        audit_log.info("api info as=%s path=%s", principal, one_line(rel) or "/")
+        self.send_json(payload)
+
+    def handle_api_list(self):
+        principal, error = self.authenticate_api("read")
+        if not principal:
+            self.reject_api(error)
+            return
+        params = self.api_query()
+        limit, err = self.int_param(params, "limit", API_LIST_DEFAULT, API_LIST_MAX)
+        if not err:
+            offset, err = self.int_param(params, "offset", 0, 10 ** 7)
+        else:
+            offset = 0
+        if not err:
+            recursive = self.param(params, "recursive", "").lower() in ("1", "true", "yes")
+        if err:
+            self.send_json({"ok": False, "error": "bad_request", "message": err}, 400)
+            return
+        fp, rel, perr = self.resolve_api_path(params)
+        if perr:
+            self.reject_api(perr)
+            return
+        if not os.path.isdir(fp):
+            self.send_json({"ok": False, "error": "not_a_folder", "message": "该路径不是目录"}, 400)
+            return
+        entries, truncated = list_entries(fp, recursive, limit, offset)
+        audit_log.info("api list as=%s path=%s recursive=%s n=%s",
+                       principal, one_line(rel) or "/", recursive, len(entries))
+        self.send_json({"ok": True, "path": rel.strip("/"), "recursive": recursive,
+                        "count": len(entries), "truncated": truncated,
+                        "offset": offset, "limit": limit, "entries": entries})
+
+    def handle_api_download(self):
+        principal, error = self.authenticate_api("read")
+        if not principal:
+            self.reject_api(error)
+            return
+        params = self.api_query()
+        fp, rel, perr = self.resolve_api_path(params)
+        if perr:
+            self.reject_api(perr)
+            return
+        if not os.path.isfile(fp):
+            self.send_json({"ok": False, "error": "not_a_file", "message": "该路径不是文件，目录请用 /api/list"}, 400)
+            return
+        audit_log.info("api download as=%s file=%s size=%s",
+                       principal, one_line(rel), format_size(os.path.getsize(fp)))
+        try:
+            mime, _ = mimetypes.guess_type(fp)
+            self.send_response(200)
+            self.send_header("Content-Type", mime or "application/octet-stream")
+            self.send_header("Content-Disposition",
+                             f"attachment; filename*=UTF-8''{quote(os.path.basename(fp))}")
+            self.send_header("Content-Length", str(os.path.getsize(fp)))
+            self.end_headers()
+            self.send_file_stream(fp)
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass
+
     def handle_api_folders(self):
         principal, error = self.authenticate_api("read")
         if not principal:
@@ -1564,6 +1731,12 @@ class NASHandler(BaseHTTPRequestHandler):
             self.handle_zip_download()
         elif path == "/api/folders":
             self.handle_api_folders()
+        elif path == "/api/info":
+            self.handle_api_info()
+        elif path == "/api/list":
+            self.handle_api_list()
+        elif path == "/api/download":
+            self.handle_api_download()
         else:
             self.send_text("Not found", 404)
 
