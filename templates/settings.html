@@ -27,6 +27,19 @@ input:focus { border-color: #3b82f6; background: #fff; }
 button { padding: 10px 24px; background: #3b82f6; color: #fff; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; }
 button:hover { background: #2563eb; }
 .note { color: #999; font-size: 12px; margin-top: 12px; line-height: 1.6; }
+table.keys { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 16px; }
+table.keys th { text-align: left; color: #888; font-weight: 500; padding: 6px 8px; border-bottom: 1px solid #eee; }
+table.keys td { padding: 7px 8px; border-bottom: 1px solid #f4f4f4; color: #444; }
+table.keys td:last-child { text-align: right; white-space: nowrap; }
+table.keys .empty { color: #999; text-align: center; padding: 14px; }
+.mono { font-family: Consolas, monospace; color: #888; }
+.revoke { margin-left: 10px; padding: 2px 9px; border: 1px solid #fecaca; border-radius: 3px; background: #fff; color: #b91c1c; font-size: 12px; cursor: pointer; }
+.revoke:hover { background: #fef2f2; }
+.scopes { display: flex; flex-direction: column; gap: 6px; }
+.check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #444; margin: 0; }
+.check input { width: auto; }
+button.create { background: #10b981; }
+button.create:hover { background: #059669; }
 </style>
 </head>
 <body>
@@ -87,6 +100,34 @@ button:hover { background: #2563eb; }
 
     <button type="submit">保存设置</button>
     <div class="note">口令以 PBKDF2-SHA256 加随机盐存储；修改用户名或密码会让其他已登录会话立即失效。</div>
+  </form>
+
+  <form method="POST" action="/settings">
+    <div class="card">
+      <h2>API 密钥（{{api_key_count}} / 20）</h2>
+      <div class="field">
+        <label for="key_password">当前登录密码</label>
+        <input type="password" id="key_password" name="current_password" autocomplete="current-password" required>
+      </div>
+      <table class="keys">
+        <thead><tr><th>ID</th><th>名称</th><th>权限</th><th>本次启动后最近使用</th></tr></thead>
+        <tbody>{{api_keys_rows}}</tbody>
+      </table>
+      <div class="field">
+        <label for="key_name">新建密钥名称（例如：备份脚本 / 图床）</label>
+        <input type="text" id="key_name" name="key_name" placeholder="仅用于你自己辨认">
+      </div>
+      <div class="field">
+        <label>权限位</label>
+        <div class="scopes">
+          <label class="check"><input type="checkbox" name="key_scopes" value="read" checked>读取（列出、下载）</label>
+          <label class="check"><input type="checkbox" name="key_scopes" value="write">写入（上传、建目录、移动）</label>
+          <label class="check"><input type="checkbox" name="key_scopes" value="delete">删除</label>
+        </div>
+      </div>
+      <button type="submit" name="do" value="create_key" class="create">创建密钥</button>
+      <div class="note">密钥明文只在创建成功时显示一次，服务端只保存 SHA-256 摘要；吊销立即生效。请只给脚本所需的最小权限。</div>
+    </div>
   </form>
 </div>
 </body>

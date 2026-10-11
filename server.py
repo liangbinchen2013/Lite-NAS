@@ -273,6 +273,12 @@ ZIP_TASKS_DIR = os.path.join(BASE_DIR, ".zip_tasks")
 ZIP_TASK_TTL = 600
 MAX_ZIP_TASKS = 4
 
+api_failures = {}
+api_key_usage = {}
+API_TOKEN_PREFIX = "lnas"
+API_SCOPES = ("read", "write", "delete")
+MAX_API_KEYS = 20
+
 
 DEFAULT_CONFIG = {"username": "", "password": "", "nas_name": "Lite-NAS",
                   "rate_limit_interval": 60, "upload_limit_kb": 0, "download_limit_kb": 0}
@@ -326,6 +332,43 @@ def save_config(config):
         pass
 
 
+def api_secret_hash(secret):
+    # 密钥本身是 256 位随机串，无需慢派生；API 每次请求都要验，用 SHA-256 才不至于拖慢下载
+    return hashlib.sha256(("lite-nas-api:" + secret).encode("utf-8")).hexdigest()
+
+
+def parse_api_token(token):
+    parts = token.split("_")
+    if len(parts) != 3 or parts[0] != API_TOKEN_PREFIX or not parts[1] or not parts[2]:
+        return None, None
+    return parts[1], parts[2]
+
+
+def find_api_key(config, token):
+    key_id, secret = parse_api_token(token)
+    if not key_id:
+        return None
+    digest = api_secret_hash(secret)
+    for entry in config.get("api_keys") or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("id") == key_id and hmac.compare_digest(str(entry.get("secret_hash", "")), digest):
+            return entry
+    return None
+
+
+def create_api_key(name, scopes):
+    key_id = secrets.token_hex(4)
+    secret = secrets.token_hex(32)
+    entry = {"id": key_id, "name": name, "scopes": list(scopes),
+             "secret_hash": api_secret_hash(secret), "created": int(time.time())}
+    return entry, f"{API_TOKEN_PREFIX}_{key_id}_{secret}"
+
+
+def usable_scopes(entry):
+    return [s for s in (entry.get("scopes") or []) if s in API_SCOPES]
+
+
 def verify_user(username, password):
     config = load_config()
     stored = config.get("password", "")
@@ -369,6 +412,11 @@ def sweep_stale_state():
         sessions.pop(token, None)
     for ip in [i for i, failed_at in login_failures.items() if now - failed_at > rate_interval]:
         login_failures.pop(ip, None)
+    for ip in [i for i, failed_at in api_failures.items() if now - failed_at > rate_interval]:
+        api_failures.pop(ip, None)
+    known = {str(entry.get("id")) for entry in load_config().get("api_keys") or [] if isinstance(entry, dict)}
+    for key_id in [k for k in api_key_usage if k not in known]:
+        api_key_usage.pop(key_id, None)
     zip_sweep()
 
 
@@ -431,6 +479,23 @@ def render_login_page(error=None):
     return html
 
 
+def render_api_keys_rows(config):
+    entries = [e for e in (config.get("api_keys") or []) if isinstance(e, dict)]
+    if not entries:
+        return '<tr><td colspan="4" class="empty">还没有密钥</td></tr>'
+    rows = ""
+    for entry in entries:
+        key_id = esc(entry.get("id", ""))
+        name = esc(entry.get("name", ""))
+        scopes = esc("、".join(usable_scopes(entry)) or "无")
+        used = api_key_usage.get(entry.get("id"))
+        used_text = time.strftime("%m-%d %H:%M", time.localtime(used)) if used else "-"
+        rows += f"""
+      <tr><td class="mono">{key_id}</td><td>{name}</td><td>{scopes}</td>
+          <td>{used_text}<button type="submit" class="revoke" name="revoke_key" value="{key_id}">吊销</button></td></tr>"""
+    return rows
+
+
 def render_settings_page(message=None, ok=True):
     config = load_config()
     values = {
@@ -439,6 +504,8 @@ def render_settings_page(message=None, ok=True):
         "{{rate_limit_interval}}": esc(config.get("rate_limit_interval", 60)),
         "{{upload_limit_kb}}": esc(config.get("upload_limit_kb", 0)),
         "{{download_limit_kb}}": esc(config.get("download_limit_kb", 0)),
+        "{{api_key_count}}": str(len([e for e in (config.get("api_keys") or []) if isinstance(e, dict)])),
+        "{{api_keys_rows}}": render_api_keys_rows(config),
         "{{message}}": esc(message or ""),
         "{{message_class}}": ("ok" if ok else "err") if message else "",
     }
@@ -821,6 +888,54 @@ class NASHandler(BaseHTTPRequestHandler):
         token = self.get_cookie("session")
         return is_valid_session(token)
 
+    def send_json(self, payload, status=200):
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionAbortedError, BrokenPipeError):
+            pass
+
+    def api_fail_limited(self, client_ip):
+        interval = load_config().get("rate_limit_interval", 60)
+        marked = api_failures.get(client_ip)
+        return bool(interval) and marked and time.time() - marked < interval
+
+    def authenticate_api(self, scope):
+        """返回 (principal, error)。Authorization: Bearer <key> 优先，其次浏览器会话 Cookie。"""
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            client_ip = self.get_client_ip()
+            if self.api_fail_limited(client_ip):
+                return None, "rate_limited"
+            entry = find_api_key(load_config(), auth[len("Bearer "):].strip())
+            if not entry:
+                api_failures[client_ip] = time.time()
+                audit_log.warning("api denied (unknown key) ip=%s prefix=%s",
+                                  client_ip, one_line(auth[len("Bearer "):len('Bearer ') + 12]))
+                return None, "invalid_key"
+            if scope not in usable_scopes(entry):
+                audit_log.warning("api denied (scope=%s missing) key=%s ip=%s",
+                                  scope, one_line(entry.get("name") or entry["id"]), client_ip)
+                return None, "insufficient_scope"
+            api_failures.pop(client_ip, None)
+            api_key_usage[entry["id"]] = time.time()
+            return "key:" + str(entry.get("name") or entry["id"]), None
+        valid, username = self.is_authenticated()
+        if valid:
+            return "session:" + str(username), None
+        return None, "unauthorized"
+
+    def reject_api(self, error):
+        status = {"invalid_key": 401, "unauthorized": 401, "insufficient_scope": 403,
+                  "rate_limited": 429}.get(error, 400)
+        message = {"invalid_key": "密钥无效或已被吊销", "unauthorized": "未登录且未提供 API 密钥",
+                   "insufficient_scope": "该密钥缺少所需权限位", "rate_limited": "认证失败过于频繁，请稍后再试"}.get(error, error)
+        self.send_json({"ok": False, "error": error, "message": message}, status)
+
     def get_client_ip(self):
         peer = self.client_address[0]
         # 代理头仅在 TCP 对端确为本机回环（CF Tunnel/Nginx 同机）时可信，否则客户端可自造 IP 绕过限流
@@ -874,6 +989,46 @@ class NASHandler(BaseHTTPRequestHandler):
     def reject_settings(self, message, status):
         self.send_html(render_settings_page(message, ok=False), status)
 
+    def handle_api_keys(self, config, action, revoke_id, params, username):
+        client_ip = self.get_client_ip()
+        if action == "create_key":
+            keys = [e for e in (config.get("api_keys") or []) if isinstance(e, dict)]
+            if len(keys) >= MAX_API_KEYS:
+                self.reject_settings(f"密钥数量已达上限 {MAX_API_KEYS} 个，请先吊销一些", 400)
+                return
+            name = params.get("key_name", [""])[0].strip()
+            if not name:
+                self.reject_settings("请先填写密钥名称，否则以后没法辨认该吊销哪个", 400)
+                return
+            if len(name) > 40:
+                self.reject_settings("密钥名称请控制在 40 字以内", 400)
+                return
+            scopes = [s for s in params.get("key_scopes", []) if s in API_SCOPES]
+            if not scopes:
+                self.reject_settings("至少要勾选一个权限位", 400)
+                return
+            entry, token = create_api_key(name, scopes)
+            keys.append(entry)
+            config["api_keys"] = keys
+            save_config(config)
+            audit_log.info("api key created id=%s name=%s scopes=%s by=%s ip=%s",
+                           entry["id"], one_line(name), ",".join(scopes), username, client_ip)
+            self.send_html(render_settings_page(
+                "密钥已创建，明文只显示这一次，请立即保存：" + token))
+            return
+
+        keys = [e for e in (config.get("api_keys") or []) if isinstance(e, dict)]
+        removed = [e for e in keys if e.get("id") == revoke_id]
+        if not removed:
+            self.reject_settings("没有找到要吊销的密钥", 400)
+            return
+        config["api_keys"] = [e for e in keys if e.get("id") != revoke_id]
+        save_config(config)
+        api_key_usage.pop(revoke_id, None)
+        audit_log.info("api key revoked id=%s name=%s by=%s ip=%s",
+                       revoke_id, one_line(removed[0].get("name", "")), username, client_ip)
+        self.send_html(render_settings_page("已吊销密钥：" + str(removed[0].get("name") or revoke_id)))
+
     def handle_settings(self):
         valid, username = self.is_authenticated()
         if not valid:
@@ -908,6 +1063,12 @@ class NASHandler(BaseHTTPRequestHandler):
             if value < 0 or value > maximum:
                 return None, f"{label}需在 0 到 {maximum} 之间"
             return value, None
+
+        action = params.get("do", [""])[0]
+        revoke_id = params.get("revoke_key", [""])[0]
+        if action == "create_key" or revoke_id:
+            self.handle_api_keys(config, action, revoke_id, params, username)
+            return
 
         nas_name = text("nas_name") or "Lite-NAS"
         new_username = text("username")
@@ -1266,9 +1427,9 @@ class NASHandler(BaseHTTPRequestHandler):
         zip_drop_task(task_id)
 
     def handle_api_folders(self):
-        valid, username = self.is_authenticated()
-        if not valid:
-            self.send_text("Unauthorized", 401)
+        principal, error = self.authenticate_api("read")
+        if not principal:
+            self.reject_api(error)
             return
 
         folders = [""]
