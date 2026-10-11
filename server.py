@@ -1834,10 +1834,7 @@ class NASHandler(BaseHTTPRequestHandler):
                 continue
             folders.append(rel.replace("\\", "/"))
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(json.dumps(folders).encode("utf-8"))
+        self.send_json(folders)
 
     def handle_move(self):
         valid, username = self.is_authenticated()

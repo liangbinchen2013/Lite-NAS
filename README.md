@@ -18,7 +18,8 @@
 - 文件按字典序排列（文件夹在前）
 - 登录限流（可配置限流间隔，防止暴力破解）
 - 上传 / 下载限速（KB/s，0 为不限速）
-- 图形化设置页 `/settings`（NAS 名称、用户名、密码、限流间隔、上下行限速）
+- 图形化设置页 `/settings`（NAS 名称、用户名、密码、限流间隔、上下行限速、API 密钥管理）
+- JSON API（`/api/*`）：可用密钥读写文件，把 NAS 当轻量对象存储用
 - 本机、局域网、隧道访问都直接可用，无需额外开关
 
 ## 使用方法
@@ -102,6 +103,98 @@ Lite-NAS/
 | `download_limit_kb` | 下载限速（KB/s），0 为不限速 | 0 |
 
 以上三项也可以直接在设置页里改，保存后立即对新请求生效。
+
+`api_keys` 字段由设置页维护，不手工编辑：每项含 `id`、`name`、`scopes`、
+`secret_hash`（SHA-256 摘要）与 `created`，**不保存密钥明文**。
+
+## API（把 NAS 当对象存储用）
+
+### 认证
+
+在设置页「API 密钥」卡片创建密钥，得到形如 `lnas_<id>_<64位十六进制>` 的明文，
+**只在创建那一次显示**。请求时带上：
+
+```
+Authorization: Bearer lnas_xxxxxxxx_yyyyy...
+```
+
+权限位按端点强制，最小够用即可：
+
+| 权限位 | 允许的操作 |
+|--------|------------|
+| `read` | 列出、信息、下载 |
+| `write` | 上传、建目录、移动 |
+| `delete` | 删除 |
+
+密钥无效或缺权限分别返回 `401 invalid_key` / `403 insufficient_scope`；
+认证失败次数过多会按来源 IP 限流（复用登录限流间隔）。
+
+### 端点
+
+所有路径都是 storage 内的**相对路径**，用 `/` 分隔；空串或 `path=` 表示根目录。
+含 `.` 或 `..` 段一律 `400 invalid_path`（不静默改写）。响应统一为 JSON，
+错误形如 `{"ok": false, "error": "...", "message": "..."}`。
+
+| 方法 | 路径 | 权限 | 说明 |
+|------|------|------|------|
+| GET | `/api/info?path=` | read | 名称、用量、条目数；指定目录只统计该子树 |
+| GET | `/api/list?path=&recursive=&limit=&offset=` | read | 目录在前排序；默认 500 条，上限 2000，`truncated` 表示还有 |
+| GET | `/api/download?path=` | read | 流式下载，受下载限速；目录返回 `not_a_file` |
+| GET | `/api/folders` | read | 全部目录列表 |
+| POST | `/api/upload?path=&name=` | write | 请求体即文件内容；必须带 `Content-Length`；返回 `201`，同名自动改名并回报 `renamed` |
+| POST | `/api/mkdir` | write | JSON `{"path": "a/b"}`，多级自动创建 |
+| POST | `/api/move` | write | JSON `{"sources": ["a.txt"], "target_dir": "b"}`，移到根目录传空串 |
+| POST | `/api/delete` | delete | JSON `{"path": "a/b"}`，目录递归删除；不允许删存储根目录 |
+
+### 示例
+
+上传与下载：
+
+```bash
+curl -X POST "http://NAS:8888/api/upload?path=%E5%9B%BE%E7%89%87&name=1.jpg" \
+     -H "Authorization: Bearer lnas_...." --data-binary @1.jpg
+curl -o out.jpg "http://NAS:8888/api/download?path=%E5%9B%BE%E7%89%87/1.jpg" \
+     -H "Authorization: Bearer lnas_...."
+```
+
+列举并翻页、建目录、移动、删除：
+
+```bash
+curl -G "http://NAS:8888/api/list" --data-urlencode "recursive=1" \
+     --data-urlencode "limit=200" -H "Authorization: Bearer lnas_...."
+curl -X POST "http://NAS:8888/api/mkdir" -H "Authorization: Bearer lnas_...." \
+     -H "Content-Type: application/json" -d '{"path":"备份/2026"}'
+curl -X POST "http://NAS:8888/api/move" -H "Authorization: Bearer lnas_...." \
+     -H "Content-Type: application/json" -d '{"sources":["备份/a.txt"],"target_dir":""}'
+curl -X POST "http://NAS:8888/api/delete" -H "Authorization: Bearer lnas_...." \
+     -H "Content-Type: application/json" -d '{"path":"备份"}'
+```
+
+Python：
+
+```python
+import requests
+
+BASE = "http://NAS:8888"
+HDR = {"Authorization": "Bearer lnas_...."}
+
+with open("photo.jpg", "rb") as f:
+    r = requests.post(f"{BASE}/api/upload", params={"path": "相册", "name": "photo.jpg"},
+                      data=f, headers=HDR, timeout=None)
+    print(r.status_code, r.json()["path"], r.json().get("renamed"))
+
+entries = requests.get(f"{BASE}/api/list", params={"recursive": 1, "limit": 500},
+                       headers=HDR, timeout=30).json()["entries"]
+```
+
+### API 安全注意
+
+- 走公网请务必经 HTTPS（隧道/反代）。纯 HTTP 下密钥是明文传输的；经同机反代时，
+  `X-Forwarded-Proto: https` 会让会话 Cookie 自动带上 `Secure`
+- 未开放 CORS，跨站网页脚本无法拿你的密钥发起请求；会话 Cookie 为 `SameSite=Strict`
+- 吊销密钥立即生效（下一次请求即失效），无需重启服务
+- 审计日志 `nas.log` 记录每个 API 调用的密钥名称、路径与大小，**不含密钥明文与摘要**
+- 上传/下载限速对 API 同样生效（全局值，按连接独立）
 
 ## 安全特性
 
